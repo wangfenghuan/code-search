@@ -4,6 +4,7 @@ from pathlib import Path
 
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
+from code_search_mcp.ripgrep_engine import ExactSearchEngine, format_exact_results
 from code_search_mcp.searcher import CodeSearcher, format_search_results, resolve_repo_path
 from code_search_mcp.server import run_server
 
@@ -40,7 +41,7 @@ def main():
         help="代码库根目录路径（默认当前或最近索引项目）",
     )
 
-    # search 子命令
+    # search 子命令 (语义 + 混合)
     search_parser = subparsers.add_parser("search", help="语义搜索已索引的代码")
     search_parser.add_argument("query", help="自然语言搜索关键词")
     search_parser.add_argument(
@@ -60,6 +61,41 @@ def main():
         "--full",
         action="store_true",
         help="是否输出完整代码（默认紧凑模式节省 Token）",
+    )
+
+    # exact 子命令 (ripgrep 精确匹配)
+    exact_parser = subparsers.add_parser("exact", help="使用 ripgrep 极速精准字面量/正则搜索")
+    exact_parser.add_argument("pattern", help="要搜索的确切文本或正则表达式")
+    exact_parser.add_argument(
+        "--path",
+        "-p",
+        default="",
+        help="目标代码库路径（默认当前或最近索引项目）",
+    )
+    exact_parser.add_argument(
+        "--regex",
+        "-r",
+        action="store_true",
+        help="启用正则表达式匹配",
+    )
+    exact_parser.add_argument(
+        "--case-sensitive",
+        "-c",
+        action="store_true",
+        help="区分大小写",
+    )
+    exact_parser.add_argument(
+        "--glob",
+        "-g",
+        default="",
+        help="文件通配符过滤（如 '*.py'）",
+    )
+    exact_parser.add_argument(
+        "--max",
+        "-m",
+        type=int,
+        default=20,
+        help="最大结果数量（默认 20）",
     )
 
     # serve 子命令（默认或作为 MCP 启动）
@@ -104,6 +140,21 @@ def main():
 
         results = searcher.search(args.query, top_k=args.top_k)
         print(format_search_results(results, args.query, compact=not args.full))
+
+    elif args.command == "exact":
+        target = resolve_repo_path(args.path)
+        if not target or not target.exists():
+            print("错误: 未找到目标代码库", file=sys.stderr)
+            sys.exit(1)
+        engine = ExactSearchEngine(target)
+        res = engine.search(
+            pattern=args.pattern,
+            is_regex=args.regex,
+            case_sensitive=args.case_sensitive,
+            file_glob=args.glob,
+            max_results=args.max,
+        )
+        print(format_exact_results(res))
 
 
 if __name__ == "__main__":

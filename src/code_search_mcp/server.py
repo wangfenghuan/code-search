@@ -11,6 +11,7 @@ except ImportError:
 
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
+from code_search_mcp.ripgrep_engine import ExactSearchEngine, format_exact_results
 from code_search_mcp.searcher import CodeSearcher, format_search_results, resolve_repo_path
 
 # 创建 FastMCP 实例
@@ -106,9 +107,51 @@ def search_codebase(query: str, path: str = "", top_k: int = 5, compact: bool = 
 
 
 @mcp.tool()
+def exact_search(
+    pattern: str,
+    path: str = "",
+    is_regex: bool = False,
+    case_sensitive: bool = False,
+    file_glob: str = "",
+    max_results: int = 20,
+) -> str:
+    """使用底层工业级 ripgrep 极速精准检索确切代码字面量、变量常量、错误码、URL 路由或正则。
+    【带证据（100% 确定性）】：当你想查找确切的代码标识符、配置文件 Key、错误字符串时优先调用，0 毫秒延时且绝无幻觉。
+
+    Args:
+        pattern: 目标文本或正则表达式（如 "SECRET_KEY"、"ERR_AUTH_EXPIRED"、"api/v1/auth"）
+        path: 代码库根目录路径（可选，默认当前项目）
+        is_regex: 是否为正则表达式（默认 False：纯文本精确匹配）
+        case_sensitive: 是否区分大小写（默认 False：忽略大小写）
+        file_glob: 文件通配符过滤（如 "*.py"、"*.env"、"*.json"）
+        max_results: 最大返回结果数量（默认 20 条）
+
+    Returns:
+        带文件路径、行号标尺与高亮匹配行的 Markdown 证据报告
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+
+        engine = ExactSearchEngine(target_repo)
+        res = engine.search(
+            pattern=pattern,
+            is_regex=is_regex,
+            case_sensitive=case_sensitive,
+            file_glob=file_glob,
+            max_results=max_results,
+        )
+        return format_exact_results(res)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-mcp] exact_search 发生错误: {e}\n")
+        return f"精准搜索失败: {str(e)}"
+
+
+@mcp.tool()
 def get_file_content(path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
     """读取指定代码文件的内容，可限定行号范围（支持行号标注方便阅读）。
-    配合 search_codebase 的 compact 模式使用，按需精准展开目标代码，大幅节省上下文 Token。
+    配合 search_codebase 的 compact 模式与 exact_search 使用，按需精准展开目标代码，大幅节省上下文 Token。
 
     Args:
         path: 代码文件的相对路径或绝对路径

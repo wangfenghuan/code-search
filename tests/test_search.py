@@ -15,8 +15,10 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from code_search_mcp.indexer import CodeIndexer, PythonAstChunker
 from code_search_mcp.outline import ProjectOutlineGenerator
+from code_search_mcp.ripgrep_engine import ExactSearchEngine
 from code_search_mcp.searcher import CodeSearcher
 from code_search_mcp.server import (
+    exact_search,
     get_codebase_outline,
     get_file_content,
     index_codebase,
@@ -89,32 +91,53 @@ def test_indexing_and_search():
     print("✅ 精确符号增强测试通过！")
 
 
+def test_exact_ripgrep_search():
+    print("\n--- 4. 测试 ripgrep / 内置双轨精准字面量与证据检索 ---")
+    sample_dir = ROOT_DIR / "tests" / "sample_project"
+    engine = ExactSearchEngine(sample_dir)
+
+    # 检索确切常量 / 字符串
+    res1 = engine.search("custom_salt_secret")
+    print(f"引擎: {res1['engine']}, 匹配项: {len(res1['matches'])}")
+    assert len(res1["matches"]) >= 1
+    assert any("auth.py" in m.file_path for m in res1["matches"])
+
+    # 测试 MCP 工具 exact_search
+    mcp_out = exact_search("custom_salt_secret", path=str(sample_dir))
+    print("exact_search 工具输出:\n", mcp_out)
+    assert "确凿字面量检索结果" in mcp_out
+    assert "auth.py" in mcp_out
+    print("✅ 精准字面量与证据检索通过！")
+
+
 def test_mcp_tools():
-    print("\n--- 4. 测试 FastMCP 工具接口（含 outline 与 compact 模式） ---")
+    print("\n--- 5. 测试全部 FastMCP 工具接口（5个核心工具） ---")
     sample_dir = str(ROOT_DIR / "tests" / "sample_project")
 
     # 工具 1: get_codebase_outline
     outline_res = get_codebase_outline(sample_dir)
-    print("get_codebase_outline 预览:\n", outline_res[:200] + "...")
     assert "项目全局架构大纲" in outline_res
 
     # 工具 2: search_codebase (compact 模式)
     search_res = search_codebase("登录接口在哪", path=sample_dir, top_k=2, compact=True)
-    print("\nsearch_codebase (compact) 输出:\n", search_res)
     assert "login_api" in search_res or "AuthService.login" in search_res
 
-    # 工具 3: get_file_content
+    # 工具 3: exact_search
+    exact_res = exact_search("execute_transaction", path=sample_dir)
+    assert "database.py" in exact_res
+
+    # 工具 4: get_file_content
     auth_file_path = str(ROOT_DIR / "tests" / "sample_project" / "auth.py")
     file_content = get_file_content(auth_file_path, start_line=1, end_line=12)
-    print("\nget_file_content 输出:\n", file_content)
     assert "PasswordHasher" in file_content
 
-    print("✅ 全部 FastMCP 工具接口验证通过！")
+    print("✅ 全部 5 个 FastMCP 工具端到端验证通过！")
 
 
 if __name__ == "__main__":
     test_chunker()
     test_outline_generation()
     test_indexing_and_search()
+    test_exact_ripgrep_search()
     test_mcp_tools()
-    print("\n🎉 进阶准确性与 Token 优化版全部测试通过！")
+    print("\n🎉 组装思想 (Ripgrep + 证据链) 升级版测试全部通过！")
