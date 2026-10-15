@@ -88,11 +88,16 @@ def get_codebase_outline(path: str = "", max_depth: int = 3) -> str:
 
 @mcp.tool()
 def search_codebase(query: str, path: str = "", top_k: int = 5, compact: bool = True) -> str:
-    """使用自然语言语义 + 符号精准加权搜索代码库，返回最相关的函数、类或接口片段。
-    支持中英文混合理解、Web 路由接口识别与精确标识符匹配。
+    """【意图与概念语义检索】使用自然语言描述业务功能，通过 Dense 向量与 BM25 全文检索的 RRF 融合算法查找代码。
+
+    🎯 适用场景：
+    - 当你想按功能意图、业务概念或自然语言提问（如“用户登录认证流程”、“密码加密加盐”、“订单超时取消”、“支付回调处理”）寻找代码时；
+    - 当你不知道确切的函数名或模块名，需要全局意图召回时。
+
+    ⚠️ 适用边界：如果你已经知道确切的标识符名称、错误码（如 'ERR_AUTH'）、配置项 Key（如 'DATABASE_URL'）或特定字面量，请优先调用 `exact_search`。
 
     Args:
-        query: 自然语言查询语句，如“用户登录认证逻辑”、“POST /login 接口”、“数据库连接池配置”等
+        query: 自然语言业务描述，如“用户登录认证逻辑”、“POST /login 接口实现”、“数据库连接池配置”等
         path: 代码库根目录路径（可选，未指定时默认使用当前项目或最近一次索引的项目）
         top_k: 返回最相关的结果数量（默认 5 个）
         compact: 是否启用极简 Token 节省模式（默认 True：返回核心签名、摘要与核心前 10 行预览；False：输出完整实现代码）
@@ -128,8 +133,14 @@ def exact_search(
     file_glob: str = "",
     max_results: int = 20,
 ) -> str:
-    """使用底层工业级 ripgrep 极速精准检索确切代码字面量、变量常量、错误码、URL 路由或正则。
-    【带证据（100% 确定性）】：当你想查找确切的代码标识符、配置文件 Key、错误字符串时优先调用，0 毫秒延时且绝无幻觉。
+    """【字面量与正则精准检索】基于底层工业级 ripgrep，极速查找确切代码文本、标识符、配置项、错误码或正则。
+
+    🎯 适用场景：
+    - 当你拥有确切的代码字面量时（如确切函数名 'verify_password'、配置项 Key 'SECRET_KEY'、错误码 'ERR_INVALID_TOKEN'）；
+    - 当你想在全仓库中精确查找某个 API URL 路径字符串（如 '/api/v1/auth'）的所有引用位置；
+    - 当你需要进行跨多文件的正则表达式查找时。
+
+    ⚠️ 适用边界：如果你不知道确切的名字，只是想按模糊业务含义探索代码，请调用 `search_codebase`。
 
     Args:
         pattern: 目标文本或正则表达式（如 "SECRET_KEY"、"ERR_AUTH_EXPIRED"、"api/v1/auth"）

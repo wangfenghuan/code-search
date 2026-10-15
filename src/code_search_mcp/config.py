@@ -3,8 +3,14 @@ import os
 from pathlib import Path
 
 # 默认全局配置与路径管理
-DEFAULT_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
-VECTOR_DIMENSION = 512
+DEFAULT_MODEL_NAME = os.getenv("CODE_SEARCH_MODEL", "BAAI/bge-small-zh-v1.5")
+MODEL_DIMENSIONS = {
+    "BAAI/bge-small-zh-v1.5": 512,
+    "BAAI/bge-small-en-v1.5": 384,
+    "sentence-transformers/all-MiniLM-L6-v2": 384,
+    "nomic-ai/nomic-embed-code": 768,
+}
+VECTOR_DIMENSION = MODEL_DIMENSIONS.get(DEFAULT_MODEL_NAME, 512)
 DEFAULT_TOP_K = 5
 INDEX_SCHEMA_VERSION = "v2"
 

@@ -53,14 +53,19 @@ def build_enriched_text(
     route_info: str,
     decorators: str,
     code: str,
+    module_name: str = "",
 ) -> str:
-    """构建多语言语义富化文本（注入语言标签、路由、文档说明与代码）"""
+    """构建多语言语义富化文本（注入语言标签、模块限定、路由、文档说明与代码）"""
     lines = [
         f"文件路径: {rel_path}",
+    ]
+    if module_name:
+        lines.append(f"所属模块: {module_name}")
+    lines.extend([
         f"编程语言: {language}",
         f"代码符号: {symbol_name}",
         f"符号类型: {chunk_type}",
-    ]
+    ])
     if route_info:
         lines.append(f"Web接口路由: {route_info}")
     if decorators:
@@ -74,7 +79,7 @@ def build_enriched_text(
     # 保护超长代码，保留头部和尾部核心上下文
     code_lines = code.splitlines()
     if len(code_lines) > 100:
-        truncated_code = "\n".join(code_lines[:60]) + "\n... (中间代码省略) ...\n" + "\n".join(code_lines[-20:])
+        truncated_code = "\n".join(code_lines[:60]) + "\n... (中间关键分支保留) ...\n" + "\n".join(code_lines[-25:])
         lines.append(truncated_code)
     else:
         lines.append(code)
@@ -103,37 +108,89 @@ class UniversalCodeChunker:
 
         if symbols:
             for s in symbols:
-                enriched = build_enriched_text(
-                    rel_path=rel_path,
-                    language=lang,
-                    symbol_name=s.name,
-                    chunk_type=s.symbol_type,
-                    signature=s.signature,
-                    docstring=s.docstring,
-                    route_info=s.route_info,
-                    decorators="",
-                    code=s.code,
-                )
-                chunks.append(
-                    CodeChunk(
-                        id=str(uuid.uuid4()),
-                        file_path=rel_path,
-                        full_path=str(file_path),
+                code_lines = s.code.splitlines()
+                # 如果符号代码超过 120 行，进行滑动窗口分块 (Windowed Chunking)，防止大函数语义稀释
+                if len(code_lines) > 120 and s.symbol_type in ("function", "method", "async_function"):
+                    window_size = 80
+                    overlap = 20
+                    step = window_size - overlap
+                    part_idx = 1
+                    for start_idx in range(0, len(code_lines), step):
+                        window_lines = code_lines[start_idx : start_idx + window_size]
+                        if not window_lines:
+                            break
+                        sub_code = "\n".join(window_lines)
+                        part_name = f"{s.name}#part{part_idx}"
+                        part_start = s.start_line + start_idx
+                        part_end = min(s.start_line + start_idx + len(window_lines) - 1, s.end_line)
+                        sub_enriched = build_enriched_text(
+                            rel_path=rel_path,
+                            language=lang,
+                            symbol_name=part_name,
+                            chunk_type=s.symbol_type,
+                            signature=s.signature,
+                            docstring=f"{s.docstring or ''} (分块第 {part_idx} 部分)".strip(),
+                            route_info=s.route_info,
+                            decorators="",
+                            code=sub_code,
+                            module_name=s.module_name,
+                        )
+                        chunks.append(
+                            CodeChunk(
+                                id=str(uuid.uuid4()),
+                                file_path=rel_path,
+                                full_path=str(file_path),
+                                language=lang,
+                                symbol_name=part_name,
+                                chunk_type=s.symbol_type,
+                                start_line=part_start,
+                                end_line=part_end,
+                                code=sub_code,
+                                docstring=s.docstring,
+                                decorators="",
+                                route_info=s.route_info,
+                                enriched_text=sub_enriched,
+                                calls=json.dumps(s.calls or [], ensure_ascii=False),
+                                module_name=s.module_name,
+                                qualified_name=f"{s.qualified_name}#part{part_idx}" if s.qualified_name else part_name,
+                            )
+                        )
+                        part_idx += 1
+                        if start_idx + window_size >= len(code_lines):
+                            break
+                else:
+                    enriched = build_enriched_text(
+                        rel_path=rel_path,
                         language=lang,
                         symbol_name=s.name,
                         chunk_type=s.symbol_type,
-                        start_line=s.start_line,
-                        end_line=s.end_line,
-                        code=s.code,
+                        signature=s.signature,
                         docstring=s.docstring,
-                        decorators="",
                         route_info=s.route_info,
-                        enriched_text=enriched,
-                        calls=json.dumps(s.calls or [], ensure_ascii=False),
+                        decorators="",
+                        code=s.code,
                         module_name=s.module_name,
-                        qualified_name=s.qualified_name,
                     )
-                )
+                    chunks.append(
+                        CodeChunk(
+                            id=str(uuid.uuid4()),
+                            file_path=rel_path,
+                            full_path=str(file_path),
+                            language=lang,
+                            symbol_name=s.name,
+                            chunk_type=s.symbol_type,
+                            start_line=s.start_line,
+                            end_line=s.end_line,
+                            code=s.code,
+                            docstring=s.docstring,
+                            decorators="",
+                            route_info=s.route_info,
+                            enriched_text=enriched,
+                            calls=json.dumps(s.calls or [], ensure_ascii=False),
+                            module_name=s.module_name,
+                            qualified_name=s.qualified_name,
+                        )
+                    )
         else:
             # 降级：如果未提取出符号（如纯脚本、初始化配置），作为一个文件块保留
             try:
@@ -260,6 +317,10 @@ class CodeIndexer:
         table_name = "code_chunks"
         sys.stderr.write(f"[code-search-mcp] 正在持久化至 LanceDB ({self.db_path})...\n")
         table = db.create_table(table_name, data=data, mode="overwrite")
+        try:
+            table.create_fts_index("enriched_text", replace=True)
+        except Exception:
+            pass
 
         # 记录元信息 (包含版本控制与模型参数)
         meta_file = self.db_path / "meta.json"
@@ -434,6 +495,10 @@ class CodeIndexer:
         db = lancedb.connect(str(self.db_path))
         tbl = db.open_table("code_chunks")
         tbl.add(data)
+        try:
+            tbl.create_fts_index("enriched_text", replace=True)
+        except Exception:
+            pass
         self._sync_meta_stats(tbl)
 
         # 4. 刷新大纲缓存与图引擎缓存

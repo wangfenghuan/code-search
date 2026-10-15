@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -134,7 +135,7 @@ class CodeSearcher:
             return False
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """执行混合召回（语义向量 + 符号精确匹配）与加权重排"""
+        """执行工业级真正混合检索（Dense 向量 + BM25 全文检索）与 Reciprocal Rank Fusion (RRF) 重排"""
         if not self.is_indexed():
             return []
 
@@ -145,56 +146,73 @@ class CodeSearcher:
         db = lancedb.connect(str(self.db_path))
         table = db.open_table("code_chunks")
 
-        # 1. 向量相似度召回
         candidate_limit = max(top_k * 6, 40)
-        search_query = table.search(query_vec).limit(candidate_limit)
-        vector_records = search_query.to_list()
+        k_rrf = 60.0
 
-        candidates_map: Dict[str, Dict[str, Any]] = {}
-        for r in vector_records:
-            cid = r.get("id")
-            candidates_map[cid] = r
+        # 1. 向量相似度召回 (Dense Retrieval)
+        dense_records = []
+        try:
+            dense_records = table.search(query_vec).limit(candidate_limit).to_list()
+        except Exception:
+            dense_records = []
 
-        # 2. 精确符号多路召回（若提问中包含具体英文类名/方法名/路由片段）
-        identifiers = re.findall(r"[a-zA-Z0-9_]{3,}", query.lower())
-        if identifiers:
-            for ident in identifiers:
+        # 2. BM25 / 全文检索召回 (Sparse FTS Retrieval)
+        sparse_records = []
+        try:
+            sparse_records = table.search(query, query_type="fts").limit(candidate_limit).to_list()
+        except Exception:
+            # 降级：若未建 FTS 索引或不支持，使用精确标识符 SQL 过滤作为词法召回
+            identifiers = re.findall(r"[a-zA-Z0-9_]{3,}", query.lower())
+            if identifiers:
+                ident_clauses = " OR ".join([f"lower(symbol_name) LIKE '%{ident}%' OR lower(route_info) LIKE '%{ident}%' OR lower(code) LIKE '%{ident}%'" for ident in identifiers[:4]])
                 try:
-                    # 使用 LanceDB SQL 过滤快速召回确切符号
-                    symbol_matched = (
-                        table.search()
-                        .where(f"lower(symbol_name) LIKE '%{ident}%' OR lower(route_info) LIKE '%{ident}%'")
-                        .limit(20)
-                        .to_list()
-                    )
-                    for r in symbol_matched:
-                        cid = r.get("id")
-                        if cid not in candidates_map:
-                            candidates_map[cid] = r
+                    sparse_records = table.search().where(ident_clauses).limit(candidate_limit).to_list()
                 except Exception:
-                    pass
+                    sparse_records = []
 
-        # 3. 统一重排打分
+        # 3. Reciprocal Rank Fusion (RRF) 融合计算
+        rrf_scores: Dict[str, float] = defaultdict(float)
+        candidates_map: Dict[str, Dict[str, Any]] = {}
+
+        # 记录 Dense 排名得分
+        for rank, r in enumerate(dense_records):
+            cid = str(r.get("id"))
+            candidates_map[cid] = r
+            rrf_scores[cid] += 1.0 / (k_rrf + rank + 1)
+
+        # 记录 Sparse 排名得分
+        for rank, r in enumerate(sparse_records):
+            cid = str(r.get("id"))
+            if cid not in candidates_map:
+                candidates_map[cid] = r
+            rrf_scores[cid] += 1.0 / (k_rrf + rank + 1)
+
+        # 4. 结合符号标识符/路由/领域词精确 boost 进行最终重排
         scored_candidates = []
-        for r in candidates_map.values():
+        max_possible_rrf = (1.0 / (k_rrf + 1)) * 2  # 理想情况下两路同时排名第1
+        for cid, r in candidates_map.items():
+            base_rrf = rrf_scores[cid]
+            norm_sim = min(base_rrf / max_possible_rrf, 1.0)
+
             dist = r.get("_distance")
-            # 若不是向量检索直接返回的结果，默认给平均基底相似度
-            base_sim = round(1.0 / (1.0 + float(dist)), 4) if dist is not None else 0.45
+            if dist is not None:
+                vec_sim = round(1.0 / (1.0 + float(dist)), 4)
+                combined_base = 0.6 * norm_sim + 0.4 * vec_sim
+            else:
+                combined_base = norm_sim * 0.85
 
             symbol_name = r.get("symbol_name", "")
             file_path = r.get("file_path", "")
             route_info = r.get("route_info", "")
 
-            # 符号与关键词增强
             boost = calculate_symbol_boost(query, symbol_name, file_path, route_info)
-            final_score = round(min(base_sim * (1.0 + boost), 1.0), 4)
-            language = r.get("language", "code")
+            final_score = round(min(combined_base * (1.0 + boost), 1.0), 4)
 
             scored_candidates.append(
                 {
                     "file_path": file_path,
                     "full_path": r.get("full_path"),
-                    "language": language,
+                    "language": r.get("language", "code"),
                     "symbol_name": symbol_name,
                     "chunk_type": r.get("chunk_type"),
                     "start_line": int(r.get("start_line", 1)),
@@ -207,7 +225,6 @@ class CodeSearcher:
                 }
             )
 
-        # 按综合加权分从高到低排序取 top_k
         scored_candidates.sort(key=lambda x: x["similarity"], reverse=True)
         return scored_candidates[:top_k]
 

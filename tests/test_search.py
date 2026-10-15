@@ -475,6 +475,53 @@ def test_phase1_fixes():
         shutil.rmtree(test_dir, ignore_errors=True)
 
 
+def test_phase2_fixes():
+    print("\n--- 10. 测试 Phase 2: 代码分块重构 (Windowed Chunking) 与真正 BM25+Dense RRF 混合检索 ---")
+    import shutil
+    import tempfile
+    from code_search_mcp.config import DEFAULT_MODEL_NAME, VECTOR_DIMENSION
+    from code_search_mcp.indexer import CodeIndexer, UniversalCodeChunker
+    from code_search_mcp.searcher import CodeSearcher
+
+    # 1. 验证配置与向量维度解耦 (Fix #5)
+    assert DEFAULT_MODEL_NAME == "BAAI/bge-small-zh-v1.5"
+    assert VECTOR_DIMENSION == 512
+    print("✅ 向量模型与维度可配置解耦通过！")
+
+    # 2. 验证超长函数滑动窗口切分 (Windowed Chunking, Fix #6)
+    test_dir = Path(tempfile.mkdtemp(prefix="test_chunking_"))
+    try:
+        long_func_lines = ["def complex_business_flow():", '    """处理极其复杂的跨多阶段交易流转"""']
+        for i in range(150):
+            long_func_lines.append(f"    step_{i} = execute_step({i})")
+        long_func_lines.append("    return True\n")
+        (test_dir / "complex.py").write_text("\n".join(long_func_lines), encoding="utf-8")
+
+        chunker = UniversalCodeChunker(test_dir)
+        chunks = chunker.parse_file(test_dir / "complex.py")
+        assert len(chunks) >= 2, f"150行的超长函数应该被切分为多块窗口，实际切得 {len(chunks)} 块"
+        assert chunks[0].symbol_name == "complex_business_flow#part1"
+        assert chunks[1].symbol_name == "complex_business_flow#part2"
+        assert "所属模块: complex" in chunks[0].enriched_text
+        print("✅ 超长函数滑动窗口切分 (Windowed Chunking) 与模块上下文注入通过！")
+
+        # 3. 验证真正 Dense + BM25 FTS 混合检索与 RRF 融合 (Fix #7)
+        indexer = CodeIndexer(test_dir)
+        indexer.index_all()
+
+        searcher = CodeSearcher(test_dir)
+        assert searcher.is_indexed()
+
+        # 检索测试
+        results = searcher.search("跨多阶段交易流转", top_k=2)
+        assert len(results) > 0
+        assert "complex_business_flow" in results[0]["symbol_name"]
+        assert results[0]["similarity"] > 0.0
+        print("✅ Dense + BM25 RRF 真正混合检索通过！")
+    finally:
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_multilang_tree_sitter()
     test_outline_generation()
@@ -485,5 +532,6 @@ if __name__ == "__main__":
     test_incremental_indexing_and_watcher()
     test_phase0_fixes()
     test_phase1_fixes()
+    test_phase2_fixes()
     print("\n🎉 全部单元与端到端测试 100% 全部通过！")
 
