@@ -55,6 +55,9 @@ class CodeGraphEngine:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA synchronous=NORMAL;")
+            self._conn.execute("PRAGMA cache_size=-64000;")
+            self._conn.execute("PRAGMA temp_store=MEMORY;")
+            self._conn.execute("PRAGMA mmap_size=268435456;")
         return self._conn
 
     def _close_db(self):
@@ -307,8 +310,8 @@ class CodeGraphEngine:
             by_qual_tail[tail].append((qual, qnodes[0]))
 
         raw_calls_cursor = conn.execute("""
-            SELECT 
-                c.id, c.caller_id, c.caller_symbol, c.source_file,
+            SELECT DISTINCT
+                c.caller_id, c.caller_symbol, c.source_file,
                 n.module_name as caller_module, n.qualified_name as caller_qualified,
                 c.callee_name, c.callee_qualified, c.is_dynamic, c.dynamic_expr
             FROM calls c
@@ -318,7 +321,7 @@ class CodeGraphEngine:
 
         edges_to_insert = []
         seen_edges = set()
-        batch_size = 500
+        batch_size = 5000
 
         for call in raw_calls:
             caller_id = call["caller_id"]
@@ -343,6 +346,22 @@ class CodeGraphEngine:
                     target_node = candidates[0]
                     res_type = "EXACT_QUALIFIED"
                     conf = 1.0
+                else:
+                    same_file = [c for c in candidates if c["file_path"] == caller_file]
+                    if len(same_file) == 1:
+                        target_node = same_file[0]
+                        res_type = "EXACT_QUALIFIED"
+                        conf = 0.98
+                    else:
+                        same_dir = [c for c in candidates if Path(c["file_path"]).parent.as_posix() == caller_dir]
+                        if len(same_dir) == 1:
+                            target_node = same_dir[0]
+                            res_type = "EXACT_QUALIFIED"
+                            conf = 0.95
+                        else:
+                            target_node = candidates[0]
+                            res_type = "AMBIGUOUS"
+                            conf = 0.5
 
             if not target_node and c_qual:
                 c_tail = c_qual.split(".")[-1]
@@ -844,35 +863,37 @@ class CodeGraphEngine:
 
         conn = self._get_db()
         visited_symbols: Set[str] = set()
-        queue = deque([(symbol_name, 0, [symbol_name])])
+        queue = deque([(symbol_name, 0, [symbol_name], None)])
         impacted_tree = []
         impacted_files: Set[str] = set()
         impacted_routes: List[Dict[str, str]] = []
         routes_seen: Set[str] = set()
 
         while queue:
-            curr_sym, depth, path = queue.popleft()
+            curr_sym, depth, path, curr_id = queue.popleft()
             if curr_sym in visited_symbols or depth >= max_depth:
                 continue
             visited_symbols.add(curr_sym)
 
-            if "." in curr_sym:
-                cur_defs = conn.execute(
-                    "SELECT id FROM nodes WHERE qualified_name = ? OR symbol_name = ?",
-                    (curr_sym, curr_sym)
-                ).fetchall()
-                if not cur_defs:
+            cur_ids = [curr_id] if curr_id else []
+            if not cur_ids:
+                if "." in curr_sym:
                     cur_defs = conn.execute(
-                        "SELECT id FROM nodes WHERE qualified_name LIKE ? OR symbol_name = ?",
-                        (f"%.{curr_sym}", curr_sym)
+                        "SELECT id FROM nodes WHERE qualified_name = ? OR symbol_name = ?",
+                        (curr_sym, curr_sym)
                     ).fetchall()
-            else:
-                cur_defs = conn.execute(
-                    "SELECT id FROM nodes WHERE symbol_name = ? OR qualified_name = ?",
-                    (curr_sym, curr_sym)
-                ).fetchall()
+                    if not cur_defs:
+                        cur_defs = conn.execute(
+                            "SELECT id FROM nodes WHERE qualified_name LIKE ? OR symbol_name = ?",
+                            (f"%.{curr_sym}", curr_sym)
+                        ).fetchall()
+                else:
+                    cur_defs = conn.execute(
+                        "SELECT id FROM nodes WHERE symbol_name = ? OR qualified_name = ?",
+                        (curr_sym, curr_sym)
+                    ).fetchall()
 
-            cur_ids = [d['id'] for d in cur_defs]
+                cur_ids = [d['id'] for d in cur_defs]
 
             if cur_ids:
                 id_ph = ",".join("?" for _ in cur_ids)
@@ -929,7 +950,7 @@ class CodeGraphEngine:
                     )
 
                 if c['symbol_name'] not in visited_symbols:
-                    queue.append((c['symbol_name'], depth + 1, path + [c['symbol_name']]))
+                    queue.append((c['symbol_name'], depth + 1, path + [c['symbol_name']], c['id']))
 
         return {
             "status": "success",

@@ -661,10 +661,20 @@ class TreeSitterParser:
                 )
             del cursor_cls
 
-        # 2. 声明式查询函数/方法定义与边区间调用
+        # 2. 声明式查询函数/方法定义与单遍二分调用匹配 (Single-Pass Call Site Extraction)
         if self._py_fn_query and self._py_calls_query:
             cursor_fn = QueryCursor(self._py_fn_query)
             cursor_calls = QueryCursor(self._py_calls_query)
+
+            all_file_calls = []
+            for pat, cap in cursor_calls.matches(root):
+                if "call.root" in cap:
+                    sb = int(cap["call.root"][0].start_byte)
+                    all_file_calls.append((sb, pat, cap))
+            del cursor_calls
+            if all_file_calls:
+                all_file_calls.sort(key=lambda x: x[0])
+            call_starts = [x[0] for x in all_file_calls]
 
             for pat, cap in cursor_fn.matches(root):
                 def_node = cap["fn.def"][0]
@@ -689,9 +699,10 @@ class TreeSitterParser:
                 params_node = def_node.child_by_field_name("parameters")
                 sig = get_node_text(params_node, source) if params_node else "()"
 
-                # 边区间查询调用
-                cursor_calls.set_byte_range(int(def_node.start_byte), int(def_node.end_byte))
-                call_matches = cursor_calls.matches(root)
+                # 二分区间查询调用 (O(log K) 极速匹配)
+                idx_left = bisect.bisect_left(call_starts, int(def_node.start_byte))
+                idx_right = bisect.bisect_right(call_starts, int(def_node.end_byte))
+                call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
                 fn_calls = self._extract_py_calls(call_matches, source, imports, module_name, parent_cls or "")
 
                 full_name = f"{parent_cls}.{fn_name}" if parent_cls else fn_name
@@ -714,7 +725,6 @@ class TreeSitterParser:
                 )
 
             del cursor_fn
-            del cursor_calls
 
     def _parse_ts_js(
         self,
@@ -775,6 +785,16 @@ class TreeSitterParser:
             cursor_defs = QueryCursor(defs_query)
             cursor_calls = QueryCursor(calls_query)
 
+            all_file_calls = []
+            for pat, cap in cursor_calls.matches(root):
+                if "call.root" in cap:
+                    sb = int(cap["call.root"][0].start_byte)
+                    all_file_calls.append((sb, pat, cap))
+            del cursor_calls
+            if all_file_calls:
+                all_file_calls.sort(key=lambda x: x[0])
+            call_starts = [x[0] for x in all_file_calls]
+
             for pat, cap in cursor_defs.matches(root):
                 item_node = None
                 name = ""
@@ -823,8 +843,10 @@ class TreeSitterParser:
                 doc = get_leading_comment(outer_node, source)
                 route = self._extract_route_from_text(code_text)
 
-                cursor_calls.set_byte_range(int(item_node.start_byte), int(item_node.end_byte))
-                call_matches = cursor_calls.matches(root)
+                # 二分区间查询调用 (O(log K) 极速匹配)
+                idx_left = bisect.bisect_left(call_starts, int(item_node.start_byte))
+                idx_right = bisect.bisect_right(call_starts, int(item_node.end_byte))
+                call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
                 fn_calls = self._extract_ts_calls(call_matches, source, imports, module_name, parent_cls or "")
 
                 full_name = f"{parent_cls}.{name}" if parent_cls else name
@@ -847,7 +869,6 @@ class TreeSitterParser:
                 )
 
             del cursor_defs
-            del cursor_calls
 
     def _parse_go(
         self,
@@ -900,6 +921,16 @@ class TreeSitterParser:
             cursor_defs = QueryCursor(self._go_defs_query)
             cursor_calls = QueryCursor(self._go_calls_query)
 
+            all_file_calls = []
+            for pat, cap in cursor_calls.matches(root):
+                if "call.root" in cap:
+                    sb = int(cap["call.root"][0].start_byte)
+                    all_file_calls.append((sb, pat, cap))
+            del cursor_calls
+            if all_file_calls:
+                all_file_calls.sort(key=lambda x: x[0])
+            call_starts = [x[0] for x in all_file_calls]
+
             for pat, cap in cursor_defs.matches(root):
                 if "method.def" in cap:
                     node = cap["method.def"][0]
@@ -918,8 +949,9 @@ class TreeSitterParser:
                     params_node = node.child_by_field_name("parameters")
                     sig = get_node_text(params_node, source) if params_node else "()"
 
-                    cursor_calls.set_byte_range(s_byte, e_byte)
-                    call_matches = cursor_calls.matches(root)
+                    idx_left = bisect.bisect_left(call_starts, s_byte)
+                    idx_right = bisect.bisect_right(call_starts, e_byte)
+                    call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
                     fn_calls = self._extract_go_calls(call_matches, source, imports, module_name)
 
                     qname = f"{module_name}.{full_name}" if module_name else full_name
@@ -952,8 +984,9 @@ class TreeSitterParser:
                     params_node = node.child_by_field_name("parameters") or node.child_by_field_name("parameter_list")
                     sig = get_node_text(params_node, source) if params_node else "()"
 
-                    cursor_calls.set_byte_range(s_byte, e_byte)
-                    call_matches = cursor_calls.matches(root)
+                    idx_left = bisect.bisect_left(call_starts, s_byte)
+                    idx_right = bisect.bisect_right(call_starts, e_byte)
+                    call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
                     fn_calls = self._extract_go_calls(call_matches, source, imports, module_name)
 
                     qname = f"{module_name}.{fn_name}" if module_name else fn_name
@@ -975,7 +1008,6 @@ class TreeSitterParser:
                     )
 
             del cursor_defs
-            del cursor_calls
 
     def _extract_route_from_text(self, text: str) -> str:
         """从装饰器、注释或路由代码中提取 API 路由"""
