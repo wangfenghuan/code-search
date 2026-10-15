@@ -15,6 +15,7 @@ from code_search_mcp.graph_engine import (
     format_callers_markdown,
     format_callees_markdown,
     format_impact_markdown,
+    format_references_markdown,
 )
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
@@ -320,6 +321,32 @@ def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3) -> s
     except Exception as e:
         sys.stderr.write(f"[code-search-mcp] get_impact_radius 发生错误: {e}\n")
         return f"影响面分析失败: {str(e)}"
+
+
+@mcp.tool()
+def find_references(symbol_or_keyword: str, path: str = "") -> str:
+    """全仓库跨模块反向引用查询 (Find All References, Fix #20)。
+    同时聚合 AST 结构化调用者 (Structural Callers) 与 ripgrep 跨文件字面量/配置项引用 (Textual References)。
+    适用场景：查询某个 API、函数、错误码或配置项在全仓库中被哪些地方读取或调用。
+
+    Args:
+        symbol_or_keyword: 目标函数名、方法名、配置项 Key、错误码或文本
+        path: 代码库根目录路径（可选，未指定时默认当前项目）
+
+    Returns:
+        包含显式代码调用与配置文件字面量引用的完整 Markdown 报告
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+
+        graph = CodeGraphEngine.get_instance(target_repo)
+        res = graph.find_references(symbol_or_keyword)
+        return format_references_markdown(res)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-mcp] find_references 发生错误: {e}\n")
+        return f"查询反向引用失败: {str(e)}"
 
 
 @mcp.tool()

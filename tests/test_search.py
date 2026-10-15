@@ -522,6 +522,45 @@ def test_phase2_fixes():
         shutil.rmtree(test_dir, ignore_errors=True)
 
 
+def test_phase3_fixes():
+    print("\n--- 11. 测试 Phase 3: BFS 多层调用链路展开、业务流聚合与全仓库反向引用分析 ---")
+    sample_dir = ROOT_DIR / "tests" / "sample_project"
+    from code_search_mcp.graph_engine import CodeGraphEngine, format_references_markdown
+    from code_search_mcp.server import find_references
+
+    graph = CodeGraphEngine.get_instance(sample_dir)
+    assert graph.load()
+
+    # 1. 验证 BFS 多层调用拓扑树与端到端链路生成 (Fix #8, #9, #11)
+    explore_res = graph.explore_feature("用户登录认证与密码校验", top_k=2, max_depth=3)
+    assert explore_res["status"] == "success"
+    md = explore_res["surgical_context_markdown"]
+    print("BFS 全链路探索结果 Markdown 片段:")
+    for line in md.splitlines():
+        if "Execution Trace" in line or "└──" in line or "├──" in line or "业务调用链路" in line:
+            print("  " + line)
+
+    assert "端到端多层调用链路 (Execution Trace)" in md
+    assert "└── ➡️" in md or "├── ➡️" in md, "应包含多层树状 ASCII 调用拓扑"
+    assert len(explore_res["involved_files"]) >= 1
+    print("✅ BFS 多层执行链路生成与全景路由拓扑通过！")
+
+    # 2. 验证全仓库反向引用分析 (find_references, Fix #20)
+    ref_res = graph.find_references("hash_password")
+    assert ref_res["status"] == "success"
+    assert ref_res["structural_callers_count"] >= 1
+    assert ref_res["total_references"] >= 2
+    md_refs = format_references_markdown(ref_res)
+    assert "代码符号显式调用方" in md_refs
+    print("✅ CodeGraphEngine.find_references 反向引用分析通过！")
+
+    # 3. 验证 MCP 工具层 find_references
+    mcp_tool_res = find_references("verify_password", path=str(sample_dir))
+    assert "跨模块反向引用分析" in mcp_tool_res
+    assert "AuthService.login" in mcp_tool_res
+    print("✅ MCP Tool find_references 端到端调用验证通过！")
+
+
 if __name__ == "__main__":
     test_multilang_tree_sitter()
     test_outline_generation()
@@ -533,5 +572,6 @@ if __name__ == "__main__":
     test_phase0_fixes()
     test_phase1_fixes()
     test_phase2_fixes()
+    test_phase3_fixes()
     print("\n🎉 全部单元与端到端测试 100% 全部通过！")
 

@@ -367,10 +367,90 @@ class CodeGraphEngine:
             "impact_propagation_chain": impacted_tree,
         }
 
-    def explore_feature(self, query: str, top_k: int = 2) -> Dict[str, Any]:
-        """一键手术级探索 (对应 CodeGraph 的 codegraph_explore):
-        结合向量语义检索定位核心入口，自动顺着拓扑图聚合上下游调用关系与代码证据，
-        让 AI Agent 仅需 1 次工具调用即可获得完整的业务执行链路上下文。
+    def build_call_tree(self, root_sym: str, max_depth: int = 3) -> Dict[str, Any]:
+        """对指定根节点进行 BFS 下游展开，生成调用树与链路节点 (Fix #9)"""
+        tree_node: Dict[str, Any] = {
+            "symbol": root_sym,
+            "defined_in_repo": True,
+            "file_path": None,
+            "line": None,
+            "docstring": "",
+            "children": [],
+        }
+        root_defs = self.nodes.get(root_sym, [])
+        if root_defs:
+            tree_node["file_path"] = root_defs[0].file_path
+            tree_node["line"] = root_defs[0].start_line
+            tree_node["docstring"] = root_defs[0].docstring
+
+        visited = {root_sym}
+        queue = deque([(tree_node, root_sym, 1)])
+
+        while queue:
+            curr_item, curr_sym, depth = queue.popleft()
+            if depth > max_depth:
+                continue
+
+            callees_data = self.get_callees(curr_sym)
+            callees = callees_data.get("callees", [])
+            for c in callees:
+                c_sym = c["target_symbol"]
+                in_repo = c.get("defined_in_repo", False)
+                child_item = {
+                    "symbol": c_sym,
+                    "defined_in_repo": in_repo,
+                    "file_path": c.get("file_path"),
+                    "line": c.get("start_line"),
+                    "docstring": c.get("docstring", ""),
+                    "children": [],
+                }
+                curr_item["children"].append(child_item)
+                if in_repo and c_sym not in visited and depth < max_depth:
+                    visited.add(c_sym)
+                    queue.append((child_item, c_sym, depth + 1))
+
+        return tree_node
+
+    def format_tree_ascii(self, node: Dict[str, Any], prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
+        """将调用树格式化为目录树 ASCII 字符串列表 (Fix #11)"""
+        lines = []
+        sym = node["symbol"]
+        f_info = f" ({node['file_path']}#L{node['line']})" if node.get("file_path") else " (外部库/内置)"
+        doc = f" — *{node['docstring'].strip()}*" if node.get("docstring") else ""
+
+        if is_root:
+            lines.append(f"`{sym}`{f_info}{doc}")
+        else:
+            connector = "└── ➡️ " if is_last else "├── ➡️ "
+            lines.append(f"{prefix}{connector}`{sym}`{f_info}{doc}")
+
+        children = node.get("children", [])
+        # 去重相同文件行号的同义符号名
+        seen_targets = set()
+        deduped_children = []
+        for ch in children:
+            target_key = f"{ch.get('file_path')}:{ch.get('line')}" if ch.get("file_path") else ch.get("symbol")
+            if target_key in seen_targets:
+                continue
+            seen_targets.add(target_key)
+            deduped_children.append(ch)
+
+        # 优先展示仓库内的实现，外部内置函数最多展示 3 个
+        in_repo = [c for c in deduped_children if c.get("defined_in_repo")]
+        external = [c for c in deduped_children if not c.get("defined_in_repo")]
+        filtered_children = in_repo + external[:3]
+
+        for i, child in enumerate(filtered_children):
+            child_is_last = (i == len(filtered_children) - 1)
+            next_prefix = "" if is_root else (prefix + ("    " if is_last else "│   "))
+            lines.extend(self.format_tree_ascii(child, prefix=next_prefix, is_last=child_is_last, is_root=False))
+
+        return lines
+
+    def explore_feature(self, query: str, top_k: int = 3, max_depth: int = 3) -> Dict[str, Any]:
+        """一键全链路手术级探索 (explore_feature):
+        语义召回入口 + BFS 多层调用链路展开 + 路由全景与代码证据聚合，
+        让 AI Agent 仅需 1 次工具调用即可获得业务完整执行拓扑与证据。
         """
         if not self.load():
             return {
@@ -379,7 +459,8 @@ class CodeGraphEngine:
             }
 
         searcher = CodeSearcher(self.repo_path)
-        matches = searcher.search(query=query, top_k=top_k)
+        # 扩大初始召回候选，保证跨多模块复杂链路被完全覆盖 (Fix #8)
+        matches = searcher.search(query=query, top_k=max(top_k * 2, 6))
 
         if not matches:
             return {
@@ -388,14 +469,16 @@ class CodeGraphEngine:
                 "message": f"未找到与 '{query}' 相关的核心代码模块",
             }
 
-        # 收集关键入口与证据
         markdown_sections = []
         markdown_sections.append(f"# 🧭 业务全链路手术级探索: {query}\n")
-        markdown_sections.append(f"> 💡 **一次调用直达完整上下文**: 聚合了语义命中入口、HTTP 外部路由、下游调用依赖与核心源码。\n")
+        markdown_sections.append(f"> 💡 **一次调用直达完整上下文**: 聚合了语义命中入口、HTTP 外部路由、下游多层 BFS 调用依赖树与核心源码。\n")
 
-        visited_nodes: Set[str] = set()
+        # 收集所有已展开的子节点用于跨 entry 去重 (Fix #10)
+        global_expanded_symbols: Set[str] = set()
+        flow_idx = 1
+        all_involved_files: Set[str] = set()
 
-        for idx, m in enumerate(matches, start=1):
+        for m in matches:
             sym_name = m.get("symbol_name", "")
             file_path = m.get("file_path", "")
             route_info = m.get("route_info", "")
@@ -404,16 +487,21 @@ class CodeGraphEngine:
             start_line = m.get("start_line", 1)
             end_line = m.get("end_line", 1)
 
-            node_key = f"{file_path}:{sym_name}"
-            if node_key in visited_nodes:
+            # 去重：如果该符号已经在前置流的子树中详细展开过，跳过外层重复列出 (Fix #10)
+            if sym_name in global_expanded_symbols:
                 continue
-            visited_nodes.add(node_key)
+            if flow_idx > top_k:
+                break
 
-            markdown_sections.append(f"## 🎯 核心入口 {idx}: `{sym_name}` ({file_path}#L{start_line}-L{end_line})")
+            all_involved_files.add(file_path)
+            global_expanded_symbols.add(sym_name)
+
+            markdown_sections.append(f"## 🎯 业务调用链路 {flow_idx}: `{sym_name}` ({file_path}#L{start_line}-L{end_line})")
+
+            # 路由感知
             if route_info:
                 markdown_sections.append(f"- 🌐 **关联外部路由**: `{route_info}`")
             else:
-                # 尝试向上追溯暴露的外部 API 路由
                 impact = self.get_impact_radius(sym_name, max_depth=3)
                 up_routes = impact.get("impacted_external_routes", [])
                 if up_routes:
@@ -423,25 +511,27 @@ class CodeGraphEngine:
             if docstring:
                 markdown_sections.append(f"- 📝 **功能描述**: {docstring}")
 
-            # 拓扑向下：收集该符号调用的核心方法及其实现在哪
-            callees_res = self.get_callees(sym_name)
-            callees = callees_res.get("callees", [])
-            in_repo_callees = [c for c in callees if c.get("defined_in_repo")]
+            # BFS 多层下游依赖树构建与 ASCII 拓扑展示 (Fix #9, #11)
+            call_tree = self.build_call_tree(sym_name, max_depth=max_depth)
+            tree_lines = self.format_tree_ascii(call_tree)
+            if len(tree_lines) > 1:
+                markdown_sections.append("\n### 🛣️ 端到端多层调用链路 (Execution Trace):")
+                markdown_sections.append("```text\n" + "\n".join(tree_lines) + "\n```")
 
-            if in_repo_callees:
-                markdown_sections.append("\n### 🔄 下游依赖调用链 (Callees):")
-                for c in in_repo_callees:
-                    c_sym = c['target_symbol']
-                    c_file = c['file_path']
-                    c_line = c['start_line']
-                    c_doc = f" — *{c['docstring']}*" if c.get('docstring') else ""
-                    markdown_sections.append(f"  - ➡️ 调用 `{c_sym}` (位于 `{c_file}`:L{c_line}){c_doc}")
+            def mark_children(n: Dict[str, Any]):
+                for ch in n.get("children", []):
+                    ch_sym = ch["symbol"]
+                    global_expanded_symbols.add(ch_sym)
+                    if ch.get("file_path"):
+                        all_involved_files.add(ch["file_path"])
+                    mark_children(ch)
+            mark_children(call_tree)
 
-            # 拓扑向上：收集该符号的上游触发者
+            # 上游触发者 (Callers)
             callers_res = self.get_callers(sym_name)
             callers = callers_res.get("callers", [])
             if callers:
-                markdown_sections.append("\n### ⬆️ 上游调用方 (Callers):")
+                markdown_sections.append("\n### ⬆️ 直接上游触发方 (Callers):")
                 for c in callers[:3]:
                     c_sym = c['caller_symbol']
                     c_file = c['file_path']
@@ -450,24 +540,70 @@ class CodeGraphEngine:
                     markdown_sections.append(f"  - ⬅️ 被 `{c_sym}` 调用 (位于 `{c_file}`:L{c_line}){route_note}")
 
             # 附带源码证据
-            markdown_sections.append(f"\n### 📦 入口源码实现:")
+            markdown_sections.append(f"\n### 📦 核心源码实现片段:")
             markdown_sections.append(f"```{m.get('language', 'text')}\n{code}\n```\n")
 
-            # 如果调用的下级方法也在本仓库，补充呈现其关键源码片段（最多补充 2 个）
-            if in_repo_callees:
-                for c in in_repo_callees[:2]:
-                    target_nodes = self.nodes.get(c['target_symbol'], [])
-                    if target_nodes:
-                        tn = target_nodes[0]
-                        markdown_sections.append(f"#### 📄 下游调用实现: `{tn.symbol_name}` ({tn.file_path}#L{tn.start_line})")
-                        markdown_sections.append(f"```{m.get('language', 'text')}\n{tn.code}\n```\n")
+            flow_idx += 1
+
+        if all_involved_files:
+            markdown_sections.append("### 📁 链路涉及代码文件清单:")
+            for f in sorted(list(all_involved_files)):
+                markdown_sections.append(f"- `{f}`")
 
         full_markdown = "\n".join(markdown_sections)
         return {
             "status": "success",
             "query": query,
-            "entry_matches_count": len(matches),
+            "entry_matches_count": flow_idx - 1,
+            "involved_files": sorted(list(all_involved_files)),
             "surgical_context_markdown": full_markdown,
+        }
+
+    def find_references(self, query: str) -> Dict[str, Any]:
+        """跨模块反向引用综合分析 (Find All References, Fix #20):
+        聚合 AST 代码调用者 (Structural Callers) 与 ripgrep 跨文件字面量/配置项引用 (Textual References)
+        """
+        if not self.load():
+            return {
+                "status": "error",
+                "message": f"未找到代码库索引，请先执行 index_codebase",
+                "references": [],
+            }
+
+        # 1. 结构化 AST 调用方
+        callers_res = self.get_callers(query)
+        ast_callers = callers_res.get("callers", [])
+
+        # 2. 跨文件精准文本/配置项引用
+        from code_search_mcp.ripgrep_engine import ExactSearchEngine
+        exact_engine = ExactSearchEngine(self.repo_path)
+        ripgrep_res = exact_engine.search(query, max_results=30)
+        raw_matches = ripgrep_res.get("matches", [])
+
+        # 去重：过滤掉与 AST 重合的调用行
+        ast_locations = {f"{c['file_path']}:{c['start_line']}" for c in ast_callers}
+        text_refs = []
+        for m in raw_matches:
+            f_path = getattr(m, "file_path", None) or (m.get("file_path", "") if isinstance(m, dict) else "")
+            l_num = getattr(m, "line_number", None) or (m.get("line_number", 0) if isinstance(m, dict) else 0)
+            content = getattr(m, "line_content", None) or (m.get("line_content", "") if isinstance(m, dict) else "")
+            loc = f"{f_path}:{l_num}"
+            if loc not in ast_locations:
+                text_refs.append({
+                    "file_path": f_path,
+                    "line_number": l_num,
+                    "content": content,
+                })
+
+        return {
+            "status": "success",
+            "target": query,
+            "defined_in_repo": callers_res.get("defined_in_repo", False),
+            "structural_callers_count": len(ast_callers),
+            "structural_callers": ast_callers,
+            "textual_references_count": len(text_refs),
+            "textual_references": text_refs,
+            "total_references": len(ast_callers) + len(text_refs),
         }
 
 
@@ -574,6 +710,45 @@ def format_impact_markdown(res: Dict[str, Any]) -> str:
             route_tag = f" 🌐 [接口: `{item['route']}`]" if item.get('route') else ""
             indent = "  " * (depth - 1)
             lines.append(f"{indent}- [深度 {depth}] `{sym}` ({f_path}:L{line}){route_tag}")
+
+    return "\n".join(lines)
+
+
+def format_references_markdown(res: Dict[str, Any]) -> str:
+    """格式化反向引用分析报告为 Markdown (Fix #20)"""
+    if res.get("status") != "success":
+        return f"❌ {res.get('message', '反向引用检索失败')}"
+
+    target = res.get("target", "")
+    ast_callers = res.get("structural_callers", [])
+    text_refs = res.get("textual_references", [])
+    total = res.get("total_references", 0)
+
+    lines = [f"# 🔍 跨模块反向引用分析: `{target}` (共检索到 {total} 处引用)\n"]
+    if total == 0:
+        lines.append("未在代码库中发现任何对该符号或文本的显式引用。")
+        return "\n".join(lines)
+
+    if ast_callers:
+        lines.append(f"## 📞 1. 代码符号显式调用方 ({len(ast_callers)} 处 AST 调用):")
+        for idx, c in enumerate(ast_callers, start=1):
+            sym = c["caller_symbol"]
+            f_path = c["file_path"]
+            s_line = c["start_line"]
+            route = f" 🌐 [触发路由: `{c['route_info']}`]" if c.get("route_info") else ""
+            doc = f" — *{c['docstring']}*" if c.get("docstring") else ""
+            lines.append(f"- **{idx}. `{sym}`** (`{f_path}`:L{s_line}){route}{doc}")
+        lines.append("")
+
+    if text_refs:
+        lines.append(f"## 📝 2. 配置/字符串/常量字面量引用 ({len(text_refs)} 处文本引用):")
+        for idx, m in enumerate(text_refs, start=1):
+            f_path = m.get("file_path", "")
+            line = m.get("line_number", 0)
+            content = m.get("content", "").strip()
+            lines.append(f"- **{idx}. `{f_path}`:L{line}**")
+            lines.append(f"  ```\n  {content}\n  ```")
+        lines.append("")
 
     return "\n".join(lines)
 
