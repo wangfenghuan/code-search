@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -43,11 +44,188 @@ class CodeGraphEngine:
     def __init__(self, repo_path: str | Path):
         self.repo_path = Path(repo_path).resolve()
         self.db_path = get_repo_db_path(self.repo_path)
-        self.nodes: Dict[str, List[SymbolNode]] = defaultdict(list)
-        self.all_nodes: List[SymbolNode] = []
-        self.callers_map: Dict[str, List[SymbolNode]] = defaultdict(list)
-        self.routes_map: Dict[str, str] = {}
+        self.sqlite_path = self.db_path / "graph.sqlite3"
+        self._conn: Optional[sqlite3.Connection] = None
         self._loaded = False
+
+    def _get_db(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(self.sqlite_path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA synchronous=NORMAL;")
+        return self._conn
+
+    def _close_db(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def _init_sqlite_schema(self, conn: sqlite3.Connection):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                val TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS nodes (
+                id TEXT PRIMARY KEY,
+                file_path TEXT,
+                symbol_name TEXT,
+                chunk_type TEXT,
+                start_line INTEGER,
+                end_line INTEGER,
+                code TEXT,
+                docstring TEXT,
+                route_info TEXT,
+                module_name TEXT,
+                qualified_name TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caller_id TEXT,
+                caller_symbol TEXT,
+                callee_name TEXT,
+                callee_qualified TEXT,
+                is_dynamic INTEGER DEFAULT 0,
+                dynamic_expr TEXT DEFAULT '',
+                source_file TEXT,
+                FOREIGN KEY(caller_id) REFERENCES nodes(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_nodes_sym ON nodes(symbol_name);
+            CREATE INDEX IF NOT EXISTS idx_nodes_qual ON nodes(qualified_name);
+            CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
+            CREATE INDEX IF NOT EXISTS idx_nodes_route ON nodes(route_info);
+            CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name);
+            CREATE INDEX IF NOT EXISTS idx_calls_callee_qual ON calls(callee_qualified);
+            CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_symbol);
+            CREATE INDEX IF NOT EXISTS idx_calls_caller_id ON calls(caller_id);
+        """)
+        conn.commit()
+
+    def _sync_from_lancedb(self) -> bool:
+        """从 LanceDB 表 code_chunks 流式读取并构建 SQLite 图谱索引"""
+        try:
+            db = lancedb.connect(str(self.db_path))
+            tbl = db.open_table("code_chunks")
+        except Exception:
+            return False
+
+        conn = self._get_db()
+        self._init_sqlite_schema(conn)
+
+        # 清理旧数据，保证一致性
+        conn.execute("DELETE FROM calls;")
+        conn.execute("DELETE FROM nodes;")
+
+        arrow_tbl = tbl.to_arrow()
+        batch_size = 500
+        total_rows = arrow_tbl.num_rows
+
+        nodes_to_insert = []
+        calls_to_insert = []
+
+        for i in range(total_rows):
+            row = {col: arrow_tbl.column(col)[i].as_py() for col in arrow_tbl.schema.names}
+            node_id = str(row.get("id", ""))
+            file_path = str(row.get("file_path", ""))
+            sym_name = str(row.get("symbol_name", ""))
+            chunk_type = str(row.get("chunk_type", ""))
+            start_line = int(row.get("start_line", 1))
+            end_line = int(row.get("end_line", 1))
+            code = str(row.get("code", ""))
+            docstring = str(row.get("docstring", ""))
+            route_info = str(row.get("route_info", ""))
+            module_name = str(row.get("module_name", ""))
+            qualified_name = str(row.get("qualified_name", ""))
+
+            nodes_to_insert.append((
+                node_id, file_path, sym_name, chunk_type, start_line, end_line,
+                code, docstring, route_info, module_name, qualified_name
+            ))
+
+            calls_raw = row.get("calls", "[]")
+            try:
+                calls_list = json.loads(calls_raw) if isinstance(calls_raw, str) else list(calls_raw)
+            except Exception:
+                calls_list = []
+
+            for call_item in calls_list:
+                call_str = str(call_item).strip()
+                if not call_str:
+                    continue
+                is_dynamic = 0
+                dynamic_expr = ""
+                callee_name = call_str
+                callee_qual = ""
+
+                if call_str.startswith("dynamic:"):
+                    is_dynamic = 1
+                    dynamic_expr = call_str[len("dynamic:"):].strip()
+                    if dynamic_expr.startswith("getattr(") and ")" in dynamic_expr:
+                        inner = dynamic_expr[len("getattr("):dynamic_expr.find(")")]
+                        parts = [p.strip() for p in inner.split(",", 1)]
+                        if len(parts) == 2:
+                            callee_name = parts[1]
+                    elif dynamic_expr.startswith("subscript(") and ")" in dynamic_expr:
+                        inner = dynamic_expr[len("subscript("):dynamic_expr.find(")")]
+                        parts = [p.strip() for p in inner.split(",", 1)]
+                        if len(parts) == 2:
+                            callee_name = parts[1]
+                    elif dynamic_expr.startswith("index(") and ")" in dynamic_expr:
+                        inner = dynamic_expr[len("index("):dynamic_expr.find(")")]
+                        parts = [p.strip() for p in inner.split(",", 1)]
+                        if len(parts) == 2:
+                            callee_name = parts[1]
+                elif call_str.startswith("<dynamic:"):
+                    is_dynamic = 1
+                    dynamic_expr = call_str
+                    callee_name = call_str
+                else:
+                    if "." in call_str:
+                        callee_qual = call_str
+                        callee_name = call_str.split(".")[-1]
+                    else:
+                        callee_name = call_str
+
+                calls_to_insert.append((
+                    node_id, sym_name, callee_name, callee_qual, is_dynamic, dynamic_expr, file_path
+                ))
+
+            if len(nodes_to_insert) >= batch_size:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    nodes_to_insert
+                )
+                nodes_to_insert.clear()
+
+            if len(calls_to_insert) >= batch_size:
+                conn.executemany(
+                    "INSERT INTO calls (caller_id, caller_symbol, callee_name, callee_qualified, is_dynamic, dynamic_expr, source_file) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    calls_to_insert
+                )
+                calls_to_insert.clear()
+
+        if nodes_to_insert:
+            conn.executemany(
+                "INSERT OR REPLACE INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                nodes_to_insert
+            )
+        if calls_to_insert:
+            conn.executemany(
+                "INSERT INTO calls (caller_id, caller_symbol, callee_name, callee_qualified, is_dynamic, dynamic_expr, source_file) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                calls_to_insert
+            )
+
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (INDEX_SCHEMA_VERSION,))
+        conn.commit()
+        return True
 
     @classmethod
     def get_instance(cls, repo_path: str | Path) -> "CodeGraphEngine":
@@ -69,16 +247,13 @@ class CodeGraphEngine:
                 _engine_cache[resolved].reload()
 
     def reload(self) -> bool:
-        """重载 LanceDB 最新切片并重建内存拓扑图"""
+        """重载 LanceDB 最新切片并重建 SQLite 拓扑图"""
         self._loaded = False
-        self.nodes.clear()
-        self.all_nodes.clear()
-        self.callers_map.clear()
-        self.routes_map.clear()
-        return self.load()
+        self._close_db()
+        return self._sync_from_lancedb()
 
     def load(self) -> bool:
-        """加载 LanceDB 索引并构建符号调用拓扑图"""
+        """按需连接 SQLite 代码图谱库，若不存在则首次自 LanceDB 索引同步"""
         if self._loaded:
             return True
 
@@ -95,55 +270,78 @@ class CodeGraphEngine:
             except Exception:
                 pass
 
-        try:
-            db = lancedb.connect(str(self.db_path))
-            tbl = db.open_table("code_chunks")
-            records = tbl.to_arrow().to_pylist()
-            for row in records:
-                calls_raw = row.get("calls", "[]")
-                try:
-                    calls_list = json.loads(calls_raw) if isinstance(calls_raw, str) else list(calls_raw)
-                except Exception:
-                    calls_list = []
+        if self.sqlite_path.exists():
+            try:
+                conn = self._get_db()
+                row = conn.execute("SELECT count(*) as c FROM nodes").fetchone()
+                if row and row['c'] > 0:
+                    self._loaded = True
+                    return True
+            except Exception:
+                pass
 
-                node = SymbolNode(
-                    id=str(row.get("id", "")),
-                    file_path=str(row.get("file_path", "")),
-                    symbol_name=str(row.get("symbol_name", "")),
-                    chunk_type=str(row.get("chunk_type", "")),
-                    start_line=int(row.get("start_line", 1)),
-                    end_line=int(row.get("end_line", 1)),
-                    code=str(row.get("code", "")),
-                    docstring=str(row.get("docstring", "")),
-                    route_info=str(row.get("route_info", "")),
-                    calls=calls_list,
-                    module_name=str(row.get("module_name", "")),
-                    qualified_name=str(row.get("qualified_name", "")),
-                )
-                self.all_nodes.append(node)
-                # 1. 优先使用全限定名索引
-                if node.qualified_name:
-                    self.nodes[node.qualified_name].append(node)
-                # 2. 原符号名索引
-                if node.symbol_name:
-                    self.nodes[node.symbol_name].append(node)
-                # 3. 尾部短名索引
-                if "." in node.symbol_name:
-                    short_name = node.symbol_name.split(".")[-1]
-                    self.nodes[short_name].append(node)
-
-                if node.route_info:
-                    self.routes_map[node.symbol_name] = node.route_info
-
-            # 构建反向调用图 callers_map
-            for node in self.all_nodes:
-                for target in node.calls:
-                    self.callers_map[target].append(node)
-
+        success = self._sync_from_lancedb()
+        if success:
             self._loaded = True
-            return True
-        except Exception:
-            return False
+        return success
+
+    @property
+    def nodes(self) -> Dict[str, List[SymbolNode]]:
+        """向后兼容属性：若有代码直接访问 nodes 字典，按需从 SQLite 组装"""
+        conn = self._get_db()
+        cursor = conn.execute("SELECT * FROM nodes")
+        result: Dict[str, List[SymbolNode]] = defaultdict(list)
+        for r in cursor.fetchall():
+            node = SymbolNode(
+                id=r['id'],
+                file_path=r['file_path'],
+                symbol_name=r['symbol_name'],
+                chunk_type=r['chunk_type'],
+                start_line=r['start_line'],
+                end_line=r['end_line'],
+                code=r['code'],
+                docstring=r['docstring'],
+                route_info=r['route_info'],
+                calls=[],
+                module_name=r['module_name'],
+                qualified_name=r['qualified_name'],
+            )
+            if node.qualified_name:
+                result[node.qualified_name].append(node)
+            if node.symbol_name:
+                result[node.symbol_name].append(node)
+            if "." in node.symbol_name:
+                result[node.symbol_name.split(".")[-1]].append(node)
+        return result
+
+    @property
+    def all_nodes(self) -> List[SymbolNode]:
+        """向后兼容属性：若有代码直接访问 all_nodes，按需从 SQLite 组装"""
+        conn = self._get_db()
+        cursor = conn.execute("SELECT * FROM nodes")
+        return [
+            SymbolNode(
+                id=r['id'],
+                file_path=r['file_path'],
+                symbol_name=r['symbol_name'],
+                chunk_type=r['chunk_type'],
+                start_line=r['start_line'],
+                end_line=r['end_line'],
+                code=r['code'],
+                docstring=r['docstring'],
+                route_info=r['route_info'],
+                calls=[],
+                module_name=r['module_name'],
+                qualified_name=r['qualified_name'],
+            )
+            for r in cursor.fetchall()
+        ]
+
+    @property
+    def routes_map(self) -> Dict[str, str]:
+        conn = self._get_db()
+        cursor = conn.execute("SELECT symbol_name, route_info FROM nodes WHERE route_info != ''")
+        return {r['symbol_name']: r['route_info'] for r in cursor.fetchall()}
 
     def disambiguate_target(
         self, caller_file: str, called_name: str, candidates: List[SymbolNode]
@@ -154,23 +352,19 @@ class CodeGraphEngine:
         if len(candidates) == 1:
             return candidates[0], False, []
 
-        # 1. 优先匹配完全相同的全限定名
         exact_qname = [n for n in candidates if n.qualified_name == called_name]
         if len(exact_qname) == 1:
             return exact_qname[0], False, []
 
-        # 2. 优先同一文件
         same_file = [n for n in candidates if n.file_path == caller_file]
         if len(same_file) == 1:
             return same_file[0], False, []
 
-        # 3. 优先同一目录
         caller_dir = Path(caller_file).parent.as_posix()
         same_dir = [n for n in candidates if Path(n.file_path).parent.as_posix() == caller_dir]
         if len(same_dir) == 1:
             return same_dir[0], False, []
 
-        # 4. 无法自动唯一消歧，返回第一个候选并标明歧义候选列表
         cand_strs = [f"{n.qualified_name or n.symbol_name} ({n.file_path}#L{n.start_line})" for n in candidates]
         return candidates[0], True, cand_strs
 
@@ -183,44 +377,64 @@ class CodeGraphEngine:
                 "callers": [],
             }
 
-        # 支持完整名称或方法名匹配
+        conn = self._get_db()
         target_keys = [symbol_name]
         if "." in symbol_name:
             target_keys.append(symbol_name.split(".")[-1])
 
-        is_defined_in_repo = any(k in self.nodes for k in target_keys)
-        def_nodes = self.nodes.get(symbol_name, [])
-        unique_defs = list({f"{n.file_path}:{n.start_line}": n for n in def_nodes}.values())
+        placeholders = ",".join("?" for _ in target_keys)
+        cursor = conn.execute(
+            f"SELECT id, symbol_name, qualified_name, file_path, start_line FROM nodes WHERE symbol_name IN ({placeholders}) OR qualified_name IN ({placeholders})",
+            target_keys + target_keys,
+        )
+        def_rows = cursor.fetchall()
+        is_defined_in_repo = len(def_rows) > 0
+        unique_defs = list({f"{r['file_path']}:{r['start_line']}": r for r in def_rows}.values())
         is_ambiguous_def = len(unique_defs) > 1
         ambig_defs = (
-            [f"{n.qualified_name or n.symbol_name} ({n.file_path}#L{n.start_line})" for n in unique_defs]
+            [f"{r['qualified_name'] or r['symbol_name']} ({r['file_path']}#L{r['start_line']})" for r in unique_defs]
             if is_ambiguous_def
             else []
         )
 
-        callers_seen: Set[str] = set()
-        matched_callers: List[Dict[str, Any]] = []
+        # 按需从 SQLite 查询调用者 (通过 B-Tree 索引秒查)
+        query_sql = f"""
+            SELECT DISTINCT
+                n.id, n.symbol_name, n.chunk_type, n.file_path, n.start_line, n.end_line,
+                n.route_info, n.docstring, n.code, c.is_dynamic, c.dynamic_expr
+            FROM calls c
+            JOIN nodes n ON c.caller_id = n.id
+            WHERE c.callee_name IN ({placeholders}) OR c.callee_qualified IN ({placeholders})
+        """
+        cursor = conn.execute(query_sql, target_keys + target_keys)
+        caller_rows = cursor.fetchall()
 
-        for k in target_keys:
-            for caller in self.callers_map.get(k, []):
-                unique_key = f"{caller.file_path}:{caller.symbol_name}:{caller.start_line}"
-                if unique_key not in callers_seen:
-                    callers_seen.add(unique_key)
-                    # 摘取前 12 行代码作为预览
-                    lines = caller.code.splitlines()
-                    preview = "\n".join(lines[:12]) + ("\n..." if len(lines) > 12 else "")
-                    matched_callers.append(
-                        {
-                            "caller_symbol": caller.symbol_name,
-                            "symbol_type": caller.chunk_type,
-                            "file_path": caller.file_path,
-                            "start_line": caller.start_line,
-                            "end_line": caller.end_line,
-                            "route_info": caller.route_info,
-                            "docstring": caller.docstring,
-                            "code_preview": preview,
-                        }
-                    )
+        matched_callers = []
+        callers_seen = set()
+        for r in caller_rows:
+            uniq = f"{r['file_path']}:{r['symbol_name']}:{r['start_line']}"
+            if uniq not in callers_seen:
+                callers_seen.add(uniq)
+                lines = (r['code'] or '').splitlines()
+                preview = "\n".join(lines[:12]) + ("\n..." if len(lines) > 12 else "")
+                doc = r['docstring'] or ""
+                if r['is_dynamic']:
+                    dyn_note = f" [⚡ 动态调用: {r['dynamic_expr']}]"
+                    doc = (doc + dyn_note) if doc else dyn_note
+                matched_callers.append(
+                    {
+                        "caller_symbol": r['symbol_name'],
+                        "symbol_type": r['chunk_type'],
+                        "file_path": r['file_path'],
+                        "start_line": r['start_line'],
+                        "end_line": r['end_line'],
+                        "route_info": r['route_info'],
+                        "docstring": doc,
+                        "code_preview": preview,
+                        "is_dynamic": bool(r['is_dynamic']),
+                        "dynamic_expr": r['dynamic_expr'] or "",
+                    }
+                )
 
         return {
             "status": "success",
@@ -240,7 +454,20 @@ class CodeGraphEngine:
                 "callees": [],
             }
 
-        nodes = self.nodes.get(symbol_name, [])
+        conn = self._get_db()
+        cursor = conn.execute(
+            "SELECT id, symbol_name, qualified_name, file_path, start_line, docstring FROM nodes WHERE symbol_name = ? OR qualified_name = ? LIMIT 5",
+            (symbol_name, symbol_name),
+        )
+        nodes = cursor.fetchall()
+        if not nodes and "." in symbol_name:
+            short = symbol_name.split(".")[-1]
+            cursor = conn.execute(
+                "SELECT id, symbol_name, qualified_name, file_path, start_line, docstring FROM nodes WHERE symbol_name = ? OR symbol_name LIKE ? LIMIT 5",
+                (short, f"%.{short}"),
+            )
+            nodes = cursor.fetchall()
+
         if not nodes:
             return {
                 "status": "not_found",
@@ -250,43 +477,89 @@ class CodeGraphEngine:
             }
 
         caller_node = nodes[0]
-        caller_file = caller_node.file_path
+        caller_file = caller_node['file_path']
 
-        all_calls = set()
-        for n in nodes:
-            all_calls.update(n.calls)
+        cursor = conn.execute(
+            """
+            SELECT DISTINCT callee_name, callee_qualified, is_dynamic, dynamic_expr
+            FROM calls
+            WHERE caller_symbol = ? OR caller_symbol = ?
+            ORDER BY callee_name
+            """,
+            (caller_node['symbol_name'], symbol_name),
+        )
+        call_rows = cursor.fetchall()
 
         callees_detail = []
-        for called in sorted(all_calls):
-            # 尝试在索引中定位该符号的具体定义
-            target_nodes = self.nodes.get(called, [])
-            if target_nodes:
-                def_node, is_ambiguous, candidate_list = self.disambiguate_target(caller_file, called, target_nodes)
+        for crow in call_rows:
+            c_name = crow['callee_name']
+            c_qual = crow['callee_qualified']
+            is_dyn = bool(crow['is_dynamic'])
+            dyn_expr = crow['dynamic_expr'] or ""
+
+            target_keys = [k for k in (c_qual, c_name) if k]
+            if not target_keys:
+                continue
+
+            ph = ",".join("?" for _ in target_keys)
+            c_cursor = conn.execute(
+                f"SELECT id, symbol_name, qualified_name, chunk_type, file_path, start_line, docstring FROM nodes WHERE qualified_name IN ({ph}) OR symbol_name IN ({ph})",
+                target_keys + target_keys,
+            )
+            cand_rows = c_cursor.fetchall()
+
+            if cand_rows:
+                cand_nodes = [
+                    SymbolNode(
+                        id=r['id'],
+                        file_path=r['file_path'],
+                        symbol_name=r['symbol_name'],
+                        chunk_type=r['chunk_type'],
+                        start_line=r['start_line'],
+                        end_line=r['start_line'],
+                        code="",
+                        docstring=r['docstring'],
+                        route_info="",
+                        calls=[],
+                        module_name="",
+                        qualified_name=r['qualified_name'],
+                    )
+                    for r in cand_rows
+                ]
+                def_node, is_ambig, cand_list = self.disambiguate_target(caller_file, c_name, cand_nodes)
+                doc = def_node.docstring if def_node else ""
+                if is_dyn and dyn_expr:
+                    doc = f"[⚡ 动态调用: {dyn_expr}] " + doc
                 callees_detail.append(
                     {
-                        "target_symbol": called,
+                        "target_symbol": c_name,
                         "defined_in_repo": True,
                         "file_path": def_node.file_path if def_node else None,
                         "qualified_name": def_node.qualified_name if def_node else "",
                         "symbol_type": def_node.chunk_type if def_node else "symbol",
                         "start_line": def_node.start_line if def_node else None,
-                        "docstring": def_node.docstring if def_node else "",
-                        "ambiguous": is_ambiguous,
-                        "candidates": candidate_list,
+                        "docstring": doc,
+                        "ambiguous": is_ambig,
+                        "candidates": cand_list,
+                        "is_dynamic": is_dyn,
+                        "dynamic_expr": dyn_expr,
                     }
                 )
             else:
+                doc = f"[⚡ 动态调用: {dyn_expr}]" if (is_dyn and dyn_expr) else ""
                 callees_detail.append(
                     {
-                        "target_symbol": called,
+                        "target_symbol": c_name,
                         "defined_in_repo": False,
                         "file_path": None,
                         "qualified_name": "",
                         "symbol_type": "external_or_builtin",
                         "start_line": None,
-                        "docstring": "",
+                        "docstring": doc,
                         "ambiguous": False,
                         "candidates": [],
+                        "is_dynamic": is_dyn,
+                        "dynamic_expr": dyn_expr,
                     }
                 )
 
@@ -307,6 +580,7 @@ class CodeGraphEngine:
                 "message": f"未找到代码库索引，请先执行 index_codebase",
             }
 
+        conn = self._get_db()
         visited_symbols: Set[str] = set()
         queue = deque([(symbol_name, 0, [symbol_name])])
         impacted_tree = []
@@ -320,41 +594,50 @@ class CodeGraphEngine:
                 continue
             visited_symbols.add(curr_sym)
 
-            # 查询调用方
             keys = [curr_sym]
             if "." in curr_sym:
                 keys.append(curr_sym.split(".")[-1])
 
-            callers = []
-            for k in keys:
-                callers.extend(self.callers_map.get(k, []))
+            ph = ",".join("?" for _ in keys)
+            cursor = conn.execute(
+                f"""
+                SELECT DISTINCT n.id, n.symbol_name, n.chunk_type, n.file_path, n.start_line, n.route_info, c.is_dynamic, c.dynamic_expr
+                FROM calls c
+                JOIN nodes n ON c.caller_id = n.id
+                WHERE c.callee_name IN ({ph}) OR c.callee_qualified IN ({ph})
+                """,
+                keys + keys,
+            )
+            callers = cursor.fetchall()
 
             for c in callers:
-                impacted_files.add(c.file_path)
+                impacted_files.add(c['file_path'])
                 item = {
                     "depth": depth + 1,
-                    "symbol": c.symbol_name,
-                    "type": c.chunk_type,
-                    "file_path": c.file_path,
-                    "line": c.start_line,
-                    "route": c.route_info,
-                    "propagation_path": " -> ".join(path + [c.symbol_name]),
+                    "symbol": c['symbol_name'],
+                    "type": c['chunk_type'],
+                    "file_path": c['file_path'],
+                    "line": c['start_line'],
+                    "route": c['route_info'],
+                    "propagation_path": " -> ".join(path + [c['symbol_name']]),
+                    "is_dynamic": bool(c['is_dynamic']),
+                    "dynamic_expr": c['dynamic_expr'] or "",
                 }
                 impacted_tree.append(item)
 
-                if c.route_info and c.route_info not in routes_seen:
-                    routes_seen.add(c.route_info)
+                if c['route_info'] and c['route_info'] not in routes_seen:
+                    routes_seen.add(c['route_info'])
                     impacted_routes.append(
                         {
-                            "route": c.route_info,
-                            "handler": c.symbol_name,
-                            "file_path": c.file_path,
-                            "line": str(c.start_line),
+                            "route": c['route_info'],
+                            "handler": c['symbol_name'],
+                            "file_path": c['file_path'],
+                            "line": str(c['start_line']),
                         }
                     )
 
-                if c.symbol_name not in visited_symbols:
-                    queue.append((c.symbol_name, depth + 1, path + [c.symbol_name]))
+                if c['symbol_name'] not in visited_symbols:
+                    queue.append((c['symbol_name'], depth + 1, path + [c['symbol_name']]))
 
         return {
             "status": "success",
@@ -377,11 +660,16 @@ class CodeGraphEngine:
             "docstring": "",
             "children": [],
         }
-        root_defs = self.nodes.get(root_sym, [])
-        if root_defs:
-            tree_node["file_path"] = root_defs[0].file_path
-            tree_node["line"] = root_defs[0].start_line
-            tree_node["docstring"] = root_defs[0].docstring
+        conn = self._get_db()
+        cursor = conn.execute(
+            "SELECT file_path, start_line, docstring FROM nodes WHERE symbol_name = ? OR qualified_name = ? LIMIT 1",
+            (root_sym, root_sym),
+        )
+        row = cursor.fetchone()
+        if row:
+            tree_node["file_path"] = row['file_path']
+            tree_node["line"] = row['start_line']
+            tree_node["docstring"] = row['docstring']
 
         visited = {root_sym}
         queue = deque([(tree_node, root_sym, 1)])
@@ -403,6 +691,8 @@ class CodeGraphEngine:
                     "line": c.get("start_line"),
                     "docstring": c.get("docstring", ""),
                     "children": [],
+                    "is_dynamic": c.get("is_dynamic", False),
+                    "dynamic_expr": c.get("dynamic_expr", ""),
                 }
                 curr_item["children"].append(child_item)
                 if in_repo and c_sym not in visited and depth < max_depth:
@@ -417,15 +707,15 @@ class CodeGraphEngine:
         sym = node["symbol"]
         f_info = f" ({node['file_path']}#L{node['line']})" if node.get("file_path") else " (外部库/内置)"
         doc = f" — *{node['docstring'].strip()}*" if node.get("docstring") else ""
+        dyn_badge = " [⚡动态]" if node.get("is_dynamic") else ""
 
         if is_root:
-            lines.append(f"`{sym}`{f_info}{doc}")
+            lines.append(f"`{sym}`{dyn_badge}{f_info}{doc}")
         else:
             connector = "└── ➡️ " if is_last else "├── ➡️ "
-            lines.append(f"{prefix}{connector}`{sym}`{f_info}{doc}")
+            lines.append(f"{prefix}{connector}`{sym}`{dyn_badge}{f_info}{doc}")
 
         children = node.get("children", [])
-        # 去重相同文件行号的同义符号名
         seen_targets = set()
         deduped_children = []
         for ch in children:
@@ -435,7 +725,6 @@ class CodeGraphEngine:
             seen_targets.add(target_key)
             deduped_children.append(ch)
 
-        # 优先展示仓库内的实现，外部内置函数最多展示 3 个
         in_repo = [c for c in deduped_children if c.get("defined_in_repo")]
         external = [c for c in deduped_children if not c.get("defined_in_repo")]
         filtered_children = in_repo + external[:3]

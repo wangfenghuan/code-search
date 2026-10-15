@@ -364,11 +364,39 @@ class TreeSitterParser:
                 if fn_node:
                     if fn_node.type == "identifier":
                         bare = get_node_text(fn_node, source).strip()
-                        call_names.append(bare)
-                        if imports and bare in imports.symbols:
-                            call_names.append(imports.symbols[bare])
-                        elif current_module:
-                            call_names.append(f"{current_module}.{bare}")
+                        if bare == "getattr":
+                            args_node = curr.child_by_field_name("arguments")
+                            if args_node:
+                                pos_args = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+                                if len(pos_args) >= 2:
+                                    obj_text = get_node_text(pos_args[0], source).strip()
+                                    attr_node = pos_args[1]
+                                    if attr_node.type == "string":
+                                        attr_name = get_node_text(attr_node, source).strip().strip("'\"")
+                                        call_names.append(attr_name)
+                                        call_names.append(f"dynamic:getattr({obj_text},{attr_name})")
+                                        if obj_text in ("self", "cls") and current_class:
+                                            call_names.append(f"{current_class}.{attr_name}")
+                                            if current_module:
+                                                call_names.append(f"{current_module}.{current_class}.{attr_name}")
+                                        elif imports and obj_text in imports.instances:
+                                            inst_cls = imports.instances[obj_text]
+                                            if inst_cls in imports.symbols:
+                                                call_names.append(f"{imports.symbols[inst_cls]}.{attr_name}")
+                                            else:
+                                                call_names.append(f"{inst_cls}.{attr_name}")
+                                        else:
+                                            call_names.append(f"{obj_text}.{attr_name}")
+                                    else:
+                                        dyn_name = get_node_text(attr_node, source).strip()
+                                        call_names.append(f"<dynamic:{dyn_name}>")
+                                        call_names.append(f"dynamic:getattr({obj_text},{dyn_name})")
+                        else:
+                            call_names.append(bare)
+                            if imports and bare in imports.symbols:
+                                call_names.append(imports.symbols[bare])
+                            elif current_module:
+                                call_names.append(f"{current_module}.{bare}")
                     elif fn_node.type == "attribute":
                         attr_node = fn_node.child_by_field_name("attribute")
                         obj_node = fn_node.child_by_field_name("object")
@@ -398,6 +426,51 @@ class TreeSitterParser:
                                     call_names.append(f"{sym}.{attr_name}")
                                 else:
                                     call_names.append(f"{obj_name}.{attr_name}")
+                    elif fn_node.type == "call":
+                        # 处理 getattr(obj, "method")(args) 链式调用
+                        sub_fn = fn_node.child_by_field_name("function")
+                        if sub_fn and get_node_text(sub_fn, source).strip() == "getattr":
+                            sub_args = fn_node.child_by_field_name("arguments")
+                            if sub_args:
+                                pos_args = [c for c in sub_args.children if c.type not in ("(", ")", ",")]
+                                if len(pos_args) >= 2:
+                                    obj_text = get_node_text(pos_args[0], source).strip()
+                                    attr_node = pos_args[1]
+                                    if attr_node.type == "string":
+                                        attr_name = get_node_text(attr_node, source).strip().strip("'\"")
+                                        call_names.append(attr_name)
+                                        call_names.append(f"dynamic:getattr({obj_text},{attr_name})")
+                                        if obj_text in ("self", "cls") and current_class:
+                                            call_names.append(f"{current_class}.{attr_name}")
+                                            if current_module:
+                                                call_names.append(f"{current_module}.{current_class}.{attr_name}")
+                                        elif imports and obj_text in imports.instances:
+                                            inst_cls = imports.instances[obj_text]
+                                            if inst_cls in imports.symbols:
+                                                call_names.append(f"{imports.symbols[inst_cls]}.{attr_name}")
+                                            else:
+                                                call_names.append(f"{inst_cls}.{attr_name}")
+                                        else:
+                                            call_names.append(f"{obj_text}.{attr_name}")
+                                    else:
+                                        dyn_name = get_node_text(attr_node, source).strip()
+                                        call_names.append(f"<dynamic:{dyn_name}>")
+                                        call_names.append(f"dynamic:getattr({obj_text},{dyn_name})")
+                    elif fn_node.type == "subscript":
+                        # 处理 Python 字典分发/动态下标调用: dispatch["login"](args) 或 handlers[event](args)
+                        val_node = fn_node.child_by_field_name("value")
+                        sub_node = fn_node.child_by_field_name("subscript")
+                        if val_node and sub_node:
+                            val_text = get_node_text(val_node, source).strip()
+                            if sub_node.type == "string":
+                                key_name = get_node_text(sub_node, source).strip().strip("'\"")
+                                call_names.append(key_name)
+                                call_names.append(f"{val_text}.{key_name}")
+                                call_names.append(f"dynamic:subscript({val_text},{key_name})")
+                            else:
+                                dyn_key = get_node_text(sub_node, source).strip()
+                                call_names.append(f"<dynamic:{dyn_key}>")
+                                call_names.append(f"dynamic:subscript({val_text},{dyn_key})")
             elif lang in ("typescript", "javascript") and curr.type == "call_expression":
                 fn_node = curr.child_by_field_name("function")
                 if fn_node:
@@ -433,6 +506,32 @@ class TreeSitterParser:
                                     call_names.append(f"{mod}.{prop_text}")
                                 else:
                                     call_names.append(f"{obj_text}.{prop_text}")
+                    elif fn_node.type == "subscript_expression":
+                        # 处理 TS/JS 动态下标调用: obj["method"](args) 或 obj[dynamicKey](args)
+                        obj_node = fn_node.child_by_field_name("object")
+                        idx_node = fn_node.child_by_field_name("index")
+                        if obj_node and idx_node:
+                            obj_text = get_node_text(obj_node, source).strip()
+                            if idx_node.type == "string":
+                                prop_text = get_node_text(idx_node, source).strip().strip("'\"`")
+                                call_names.append(prop_text)
+                                call_names.append(f"dynamic:subscript({obj_text},{prop_text})")
+                                if obj_text == "this" and current_class:
+                                    call_names.append(f"{current_class}.{prop_text}")
+                                    if current_module:
+                                        call_names.append(f"{current_module}.{current_class}.{prop_text}")
+                                elif imports and obj_text in imports.instances:
+                                    inst_cls = imports.instances[obj_text]
+                                    if inst_cls in imports.symbols:
+                                        call_names.append(f"{imports.symbols[inst_cls]}.{prop_text}")
+                                    else:
+                                        call_names.append(f"{inst_cls}.{prop_text}")
+                                else:
+                                    call_names.append(f"{obj_text}.{prop_text}")
+                            else:
+                                dyn_var = get_node_text(idx_node, source).strip()
+                                call_names.append(f"<dynamic:{dyn_var}>")
+                                call_names.append(f"dynamic:subscript({obj_text},{dyn_var})")
             elif lang == "go" and curr.type == "call_expression":
                 fn_node = curr.child_by_field_name("function")
                 if fn_node:
@@ -450,6 +549,16 @@ class TreeSitterParser:
                             if operand_node:
                                 operand_name = get_node_text(operand_node, source).strip()
                                 call_names.append(f"{operand_name}.{field_name}")
+                    elif fn_node.type == "index_expression":
+                        # 处理 Go map 动态分发调用: handlers["key"](args)
+                        operand_node = fn_node.child_by_field_name("operand")
+                        index_node = fn_node.child_by_field_name("index")
+                        if operand_node and index_node:
+                            op_name = get_node_text(operand_node, source).strip()
+                            idx_name = get_node_text(index_node, source).strip().strip("`\"")
+                            call_names.append(idx_name)
+                            call_names.append(f"{op_name}.{idx_name}")
+                            call_names.append(f"dynamic:index({op_name},{idx_name})")
 
             lang_builtins = LANG_BUILTINS.get(lang, BUILTIN_CALLS)
             for name in call_names:

@@ -561,6 +561,80 @@ def test_phase3_fixes():
     print("✅ MCP Tool find_references 端到端调用验证通过！")
 
 
+def test_dynamic_calls_and_sqlite_engine():
+    print("\n--- 12. 测试动态调用识别 (getattr / obj[dynamic]) 与 SQLite 按需图引擎 ---")
+    from code_search_mcp.multilang_parser import TreeSitterParser
+    import tempfile
+    import shutil
+    from code_search_mcp.indexer import CodeIndexer
+    from code_search_mcp.graph_engine import CodeGraphEngine
+
+    parser = TreeSitterParser()
+
+    # 1. 验证 Python 动态调用抽取 (getattr 字符串字面量、动态变量与字典分发)
+    py_code = '''
+class DynamicWorker:
+    def execute(self, action_var: str):
+        # 1. getattr 字符串字面量静态化调用
+        getattr(self, "do_task")("param1")
+        # 2. getattr 动态变量调用
+        getattr(self, action_var)("param2")
+        # 3. 字典/映射动态下标分发
+        dispatch_table["handle_event"](payload)
+
+    def do_task(self, param: str):
+        return True
+'''.encode("utf-8")
+    py_syms = parser.parse_code(py_code, file_name="dynamic_demo.py", lang="python")
+    worker_exec = [s for s in py_syms if s.name == "DynamicWorker.execute"][0]
+    print(f"Python 动态调用抽取结果: {worker_exec.calls}")
+    assert "do_task" in worker_exec.calls, "getattr字面量应成功提取目标函数名"
+    assert "handle_event" in worker_exec.calls, "subscript字典字面量应提取目标函数名"
+    assert any("<dynamic:action_var>" in c for c in worker_exec.calls), "getattr动态变量应提取动态标记"
+    print("✅ Python getattr 与下标动态调用提取通过！")
+
+    # 2. 验证 TS/JS 动态下标调用抽取 (obj['prop'] 与 obj[dynamic])
+    ts_code = '''
+class PaymentRouter {
+    process(action: string) {
+        // 1. 下标字符串字面量调用
+        this["refundOrder"](123);
+        // 2. 下标动态变量调用
+        this[action](456);
+    }
+    refundOrder(id: number) {
+        return true;
+    }
+}
+'''.encode("utf-8")
+    ts_syms = parser.parse_code(ts_code, file_name="router.ts", lang="typescript")
+    router_proc = [s for s in ts_syms if s.name == "PaymentRouter.process"][0]
+    print(f"TS 动态调用抽取结果: {router_proc.calls}")
+    assert "refundOrder" in router_proc.calls, "TS obj['method'] 应提取 method"
+    assert any("<dynamic:action>" in c for c in router_proc.calls), "TS obj[dynamic] 应提取动态标记"
+    print("✅ TS/JS 下标动态调用提取通过！")
+
+    # 3. 验证 SQLite 按需查询引擎
+    sample_dir = ROOT_DIR / "tests" / "sample_project"
+    engine = CodeGraphEngine.get_instance(sample_dir)
+    assert engine.load()
+    assert engine.sqlite_path.exists(), f"SQLite 数据库文件应已生成在 {engine.sqlite_path}"
+
+    # 验证 SQLite 节点表与调用表
+    conn = engine._get_db()
+    node_count = conn.execute("SELECT count(*) as c FROM nodes").fetchone()["c"]
+    call_count = conn.execute("SELECT count(*) as c FROM calls").fetchone()["c"]
+    print(f"SQLite 图谱库当前索引: {node_count} 个节点, {call_count} 条调用边")
+    assert node_count >= 5
+    assert call_count >= 5
+
+    # 验证毫秒级按需查询
+    callers = engine.get_callers("hash_password")
+    assert callers["status"] == "success"
+    assert callers["callers_count"] >= 1
+    print("✅ SQLite 按需图引擎索引与秒级查询验证通过！")
+
+
 if __name__ == "__main__":
     test_multilang_tree_sitter()
     test_outline_generation()
@@ -573,5 +647,6 @@ if __name__ == "__main__":
     test_phase1_fixes()
     test_phase2_fixes()
     test_phase3_fixes()
+    test_dynamic_calls_and_sqlite_engine()
     print("\n🎉 全部单元与端到端测试 100% 全部通过！")
 
