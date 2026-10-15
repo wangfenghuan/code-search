@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  code-search-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: code-search-mcp:latest
+    container_name: code-search-mcp
+    stdin_open: true # 关键配置：保持标准输入打开，对接 MCP JSON-RPC stdio 协议
+    tty: false
+    volumes:
+      # 将目标项目源码目录挂载到容器 /workspace（默认只读）
+      - ./:/workspace:ro
+      # 将向量数据库持久化到 Docker 命名卷
+      - code-search-cache:/root/.code-search-mcp
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["serve"]
+
+volumes:
+  code-search-cache:

@@ -25,13 +25,17 @@ def find_system_ripgrep() -> Optional[str]:
     2. 检查系统 PATH 环境变量
     3. 检查常见安装路径与主流开发工具 (VS Code / Cursor 内置模块)
     """
-    # 1. 优先查本包自带预编译二进制
+    # 1. 优先查本包自带预编译二进制（区分 Windows 与 Linux/macOS）
     bin_dir = Path(__file__).resolve().parent / "bin"
-    bundled_names = ["rg.exe", "rg"]
-    for name in bundled_names:
-        bundled_rg = bin_dir / name
-        if bundled_rg.exists() and bundled_rg.is_file():
-            return str(bundled_rg)
+    target_bin = "rg.exe" if sys.platform == "win32" else "rg"
+    bundled_rg = bin_dir / target_bin
+    if bundled_rg.exists() and bundled_rg.is_file():
+        if sys.platform != "win32" and not os.access(bundled_rg, os.X_OK):
+            try:
+                os.chmod(bundled_rg, 0o755)
+            except Exception:
+                pass
+        return str(bundled_rg)
 
     # 2. 查系统 PATH
     rg_in_path = shutil.which("rg") or shutil.which("rg.exe")

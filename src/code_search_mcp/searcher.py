@@ -18,6 +18,16 @@ def resolve_repo_path(repo_path: Optional[str] = None) -> Optional[Path]:
         if p.exists() and p.is_dir():
             return p
 
+    # 如果在 Docker 容器内运行且挂载了 /workspace，优先作为默认工作空间
+    docker_ws = Path("/workspace")
+    if docker_ws.exists() and docker_ws.is_dir():
+        try:
+            # 只要不是完全空的挂载点就优先使用
+            if any(docker_ws.iterdir()):
+                return docker_ws
+        except Exception:
+            pass
+
     last_repo_file = get_db_dir() / "last_repo.txt"
     if last_repo_file.exists():
         try:

@@ -60,7 +60,9 @@
 
 ---
 
-## 🛠️ 快速安装
+## 🛠️ 快速安装与运行方式
+
+### 方式 A: 本地极速运行（推荐）
 
 本项目使用现代极速包管理工具 [uv](https://github.com/astral-sh/uv)：
 
@@ -73,30 +75,54 @@ cd code-search
 uv sync
 ```
 
+### 方式 B: Docker 容器化运行（零环境依赖，开箱即用）
+
+无需在宿主机安装 Python、Rust 或 Tree-sitter，镜像内部已预热构建了中文向量模型权重与 ripgrep：
+
+```bash
+# 构建镜像（预置模型权重，毫秒级冷启动）
+docker build -t code-search-mcp:latest .
+
+# 使用一键启动脚本快速运行：
+# Linux / macOS:
+./scripts/docker-run.sh /path/to/project
+
+# Windows (PowerShell):
+.\scripts\docker-run.ps1 -TargetDir D:\my-project
+```
+
+> 📖 详细 Docker 命令与参数请参阅 [Docker 完整部署指南 (DOCKER_GUIDE.md)](DOCKER_GUIDE.md)。
+
 ---
 
 ## 🔌 配置到 AI 编程助手
 
 ### 1. 配置到 Claude Code
 
-运行以下命令一键添加到 Claude Code：
-
+**本地原生运行**：
 ```bash
 claude mcp add code-search-mcp -- uv --directory /path/to/code-search-mcp run main.py
 ```
 
-或手动配置 `~/.claude.json`：
+**Docker 容器化运行**：
+```bash
+claude mcp add code-search-mcp -- docker run -i --rm -v "$(pwd):/workspace:ro" -v "code-search-cache:/root/.code-search-mcp" code-search-mcp:latest serve
+```
 
+或手动配置 `~/.claude.json`：
 ```json
 {
   "mcpServers": {
     "code-search": {
-      "command": "uv",
+      "command": "docker",
       "args": [
-        "--directory",
-        "/path/to/code-search-mcp",
         "run",
-        "main.py"
+        "-i",
+        "--rm",
+        "-v", "${workspaceFolder}:/workspace:ro",
+        "-v", "code-search-cache:/root/.code-search-mcp",
+        "code-search-mcp:latest",
+        "serve"
       ]
     }
   }
@@ -109,7 +135,8 @@ claude mcp add code-search-mcp -- uv --directory /path/to/code-search-mcp run ma
 
 - **Name**: `code-search`
 - **Type**: `command`
-- **Command**: `uv --directory /path/to/code-search-mcp run main.py`
+- **Command（原生）**: `uv --directory /path/to/code-search-mcp run main.py`
+- **Command（Docker）**: `docker run -i --rm -v /绝对路径/代码库:/workspace:ro -v code-search-cache:/root/.code-search-mcp code-search-mcp:latest serve`
 
 ---
 
