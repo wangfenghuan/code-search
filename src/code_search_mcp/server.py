@@ -9,6 +9,12 @@ try:
 except ImportError:
     from mcp.server.fastmcp import FastMCP
 
+from code_search_mcp.graph_engine import (
+    CodeGraphEngine,
+    format_callers_markdown,
+    format_callees_markdown,
+    format_impact_markdown,
+)
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
 from code_search_mcp.ripgrep_engine import ExactSearchEngine, format_exact_results
@@ -191,6 +197,111 @@ def get_file_content(path: str, start_line: Optional[int] = None, end_line: Opti
         return "\n".join(output_lines)
     except Exception as e:
         return f"获取文件内容失败: {str(e)}"
+
+
+@mcp.tool()
+def explore_codebase(query: str, path: str = "", top_k: int = 2) -> str:
+    """【旗舰级探索工具（启发自 CodeGraph）】：1 次调用直出全链路业务上下文。
+    自动结合自然语言语义检索与多语言代码知识图谱，聚合返回入口路由、核心实现、上下游依赖与源码证据，
+    彻底避免多次调用 read/grep 翻找文件，极大节省 Token 与工具交互轮次。
+
+    Args:
+        query: 业务功能或架构疑问（如“用户登录鉴权与密码哈希校验流程”、“在线支付与退款逻辑”）
+        path: 代码库根目录路径（可选，默认当前项目）
+        top_k: 聚合的核心入口数量（默认 2 个）
+
+    Returns:
+        包含入口定义、外部路由、上游调用方、下游依赖及核心源码的手术级 Markdown 报告
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+
+        engine = CodeGraphEngine(target_repo)
+        res = engine.explore_feature(query=query, top_k=top_k)
+        if res.get("status") == "success":
+            return res.get("surgical_context_markdown", "")
+        return res.get("message", "探索失败")
+    except Exception as e:
+        sys.stderr.write(f"[code-search-mcp] explore_codebase 发生错误: {e}\n")
+        return f"探索代码库失败: {str(e)}"
+
+
+@mcp.tool()
+def get_symbol_callers(symbol_name: str, path: str = "") -> str:
+    """查询代码库中谁调用了该函数或类（Call Graph 上游调用关系追踪）。
+    返回所有调用方符号、所在文件、行号、触发路由及代码预览。
+
+    Args:
+        symbol_name: 目标符号名称（如 "verify_password" 或 "AuthService.login"）
+        path: 代码库根目录路径（可选，默认当前项目）
+
+    Returns:
+        上游调用者列表及代码证据 Markdown
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+
+        engine = CodeGraphEngine(target_repo)
+        res = engine.get_callers(symbol_name)
+        return format_callers_markdown(res)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-mcp] get_symbol_callers 发生错误: {e}\n")
+        return f"查询上游调用方失败: {str(e)}"
+
+
+@mcp.tool()
+def get_symbol_callees(symbol_name: str, path: str = "") -> str:
+    """查询指定函数或方法内部直接调用的下游模块与函数列表（Call Graph 下游依赖追踪）。
+    标明调用的符号是否在仓库内定义及其所在文件与功能说明。
+
+    Args:
+        symbol_name: 目标符号名称（如 "login_api" 或 "OrderManager.CreateOrder"）
+        path: 代码库根目录路径（可选，默认当前项目）
+
+    Returns:
+        下游依赖清单 Markdown
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+
+        engine = CodeGraphEngine(target_repo)
+        res = engine.get_callees(symbol_name)
+        return format_callees_markdown(res)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-mcp] get_symbol_callees 发生错误: {e}\n")
+        return f"查询下游依赖失败: {str(e)}"
+
+
+@mcp.tool()
+def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3) -> str:
+    """【改动影响面分析（Blast Radius）】：在重构或修改代码前调用，
+    通过调用图扩散分析该符号被哪些上游模块、测试和外部 Web/API 路由直接或间接依赖，防止改出未预料的线上 Bug。
+
+    Args:
+        symbol_name: 准备修改的目标符号（如 "hash_password"、"processPayment"）
+        path: 代码库根目录路径（可选，默认当前项目）
+        max_depth: 追踪扩散的最大层级（默认 3 层）
+
+    Returns:
+        爆炸半径评估报告（包含受影响符号数、文件清单、受波及 API 路由及扩散树）
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+
+        engine = CodeGraphEngine(target_repo)
+        res = engine.get_impact_radius(symbol_name, max_depth=max_depth)
+        return format_impact_markdown(res)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-mcp] get_impact_radius 发生错误: {e}\n")
+        return f"影响面分析失败: {str(e)}"
 
 
 def run_server():

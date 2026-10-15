@@ -34,6 +34,7 @@ class CodeChunk:
     decorators: str
     route_info: str
     enriched_text: str
+    calls: str = "[]"
 
 
 def build_enriched_text(
@@ -122,6 +123,7 @@ class UniversalCodeChunker:
                         decorators="",
                         route_info=s.route_info,
                         enriched_text=enriched,
+                        calls=json.dumps(s.calls or [], ensure_ascii=False),
                     )
                 )
         else:
@@ -156,6 +158,7 @@ class UniversalCodeChunker:
                             decorators="",
                             route_info="",
                             enriched_text=enriched,
+                            calls="[]",
                         )
                     )
             except Exception:
@@ -234,6 +237,7 @@ class CodeIndexer:
                     "decorators": chunk.decorators,
                     "route_info": chunk.route_info,
                     "enriched_text": chunk.enriched_text,
+                    "calls": chunk.calls,
                     "vector": vec,
                 }
             )

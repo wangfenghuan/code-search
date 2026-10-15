@@ -1,11 +1,18 @@
 import re
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 from tree_sitter import Language, Node, Parser
+
+BUILTIN_CALLS: Set[str] = {
+    "print", "len", "range", "str", "int", "float", "bool", "dict", "list", "set", "tuple",
+    "isinstance", "type", "console.log", "log", "make", "append", "panic", "recover", "super",
+    "require", "typeof", "Error", "Exception"
+}
+
 
 # 导入语言包
 try:
@@ -58,6 +65,7 @@ class ParsedSymbol:
     docstring: Optional[str]
     route_info: str
     signature: str
+    calls: List[str] = field(default_factory=list)
 
 
 def get_node_text(node: Node, source_bytes: bytes) -> str:
@@ -127,6 +135,56 @@ class TreeSitterParser:
 
         return symbols
 
+    def _extract_calls(self, node: Node, source: bytes, lang: str) -> List[str]:
+        """提取 AST 节点内部调用的所有函数或方法名"""
+        calls: List[str] = []
+        seen = set()
+
+        def walk(curr: Node):
+            # 避开嵌套的类定义，避免干扰
+            if curr != node and curr.type in ("class_definition", "class_declaration"):
+                return
+
+            call_names = []
+            if lang == "python" and curr.type == "call":
+                fn_node = curr.child_by_field_name("function")
+                if fn_node:
+                    if fn_node.type == "identifier":
+                        call_names.append(get_node_text(fn_node, source).strip())
+                    elif fn_node.type == "attribute":
+                        attr_node = fn_node.child_by_field_name("attribute")
+                        if attr_node:
+                            call_names.append(get_node_text(attr_node, source).strip())
+            elif lang in ("typescript", "javascript") and curr.type == "call_expression":
+                fn_node = curr.child_by_field_name("function")
+                if fn_node:
+                    if fn_node.type == "identifier":
+                        call_names.append(get_node_text(fn_node, source).strip())
+                    elif fn_node.type == "member_expression":
+                        prop_node = fn_node.child_by_field_name("property")
+                        if prop_node:
+                            call_names.append(get_node_text(prop_node, source).strip())
+            elif lang == "go" and curr.type == "call_expression":
+                fn_node = curr.child_by_field_name("function")
+                if fn_node:
+                    if fn_node.type == "identifier":
+                        call_names.append(get_node_text(fn_node, source).strip())
+                    elif fn_node.type == "selector_expression":
+                        field_node = fn_node.child_by_field_name("field")
+                        if field_node:
+                            call_names.append(get_node_text(field_node, source).strip())
+
+            for name in call_names:
+                if name and name not in BUILTIN_CALLS and name not in seen:
+                    seen.add(name)
+                    calls.append(name)
+
+            for child in curr.children:
+                walk(child)
+
+        walk(node)
+        return calls
+
     def _parse_python(self, root: Node, source: bytes, symbols: List[ParsedSymbol]):
         def extract_item(node: Node):
             target = node
@@ -155,6 +213,7 @@ class TreeSitterParser:
                         docstring=doc,
                         route_info="",
                         signature="",
+                        calls=[],
                     )
                 )
 
@@ -179,6 +238,7 @@ class TreeSitterParser:
 
                             fn_doc = self._get_python_docstring(m_target, source) or get_leading_comment(item, source)
                             route = self._extract_route_from_text(get_node_text(item, source))
+                            m_calls = self._extract_calls(m_target, source, "python")
                             symbols.append(
                                 ParsedSymbol(
                                     name=f"{cls_name}.{fn_name}" if cls_name else fn_name,
@@ -189,6 +249,7 @@ class TreeSitterParser:
                                     docstring=fn_doc,
                                     route_info=route,
                                     signature=sig,
+                                    calls=m_calls,
                                 )
                             )
 
@@ -203,6 +264,7 @@ class TreeSitterParser:
 
                 doc = self._get_python_docstring(target, source) or get_leading_comment(node, source)
                 route = self._extract_route_from_text(get_node_text(node, source))
+                fn_calls = self._extract_calls(target, source, "python")
                 symbols.append(
                     ParsedSymbol(
                         name=fn_name,
@@ -213,6 +275,7 @@ class TreeSitterParser:
                         docstring=doc,
                         route_info=route,
                         signature=sig,
+                        calls=fn_calls,
                     )
                 )
 
@@ -276,6 +339,7 @@ class TreeSitterParser:
                             if m_name:
                                 m_doc = get_leading_comment(item, source)
                                 m_route = self._extract_route_from_text(get_node_text(item, source))
+                                m_calls = self._extract_calls(item, source, "typescript")
                                 symbols.append(
                                     ParsedSymbol(
                                         name=f"{cls_name}.{m_name}" if cls_name else m_name,
@@ -286,6 +350,7 @@ class TreeSitterParser:
                                         docstring=m_doc,
                                         route_info=m_route,
                                         signature=sig,
+                                        calls=m_calls,
                                     )
                                 )
 
@@ -300,6 +365,7 @@ class TreeSitterParser:
                 if fn_name:
                     doc = get_leading_comment(node, source)
                     route = self._extract_route_from_text(get_node_text(node, source))
+                    fn_calls = self._extract_calls(target, source, "typescript")
                     symbols.append(
                         ParsedSymbol(
                             name=fn_name,
@@ -310,6 +376,7 @@ class TreeSitterParser:
                             docstring=doc,
                             route_info=route,
                             signature=sig,
+                            calls=fn_calls,
                         )
                     )
 
@@ -327,6 +394,7 @@ class TreeSitterParser:
                             if v_name:
                                 doc = get_leading_comment(node, source)
                                 route = self._extract_route_from_text(code_text)
+                                fn_calls = self._extract_calls(target, source, "typescript")
                                 symbols.append(
                                     ParsedSymbol(
                                         name=v_name,
@@ -337,6 +405,7 @@ class TreeSitterParser:
                                         docstring=doc,
                                         route_info=route,
                                         signature="()",
+                                        calls=fn_calls,
                                     )
                                 )
 
@@ -364,6 +433,7 @@ class TreeSitterParser:
                                 docstring=doc,
                                 route_info="",
                                 signature="",
+                                calls=[],
                             )
                         )
 
@@ -378,6 +448,7 @@ class TreeSitterParser:
 
                 doc = get_leading_comment(child, source)
                 route = self._extract_route_from_text(get_node_text(child, source))
+                fn_calls = self._extract_calls(child, source, "go")
                 symbols.append(
                     ParsedSymbol(
                         name=fn_name,
@@ -388,6 +459,7 @@ class TreeSitterParser:
                         docstring=doc,
                         route_info=route,
                         signature=sig,
+                        calls=fn_calls,
                     )
                 )
 
@@ -404,6 +476,7 @@ class TreeSitterParser:
                 full_name = f"{recv_clean}.{fn_name}" if recv_clean else fn_name
                 doc = get_leading_comment(child, source)
                 route = self._extract_route_from_text(get_node_text(child, source))
+                fn_calls = self._extract_calls(child, source, "go")
                 symbols.append(
                     ParsedSymbol(
                         name=full_name,
@@ -414,6 +487,7 @@ class TreeSitterParser:
                         docstring=doc,
                         route_info=route,
                         signature=sig,
+                        calls=fn_calls,
                     )
                 )
 

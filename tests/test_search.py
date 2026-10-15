@@ -149,7 +149,78 @@ def test_mcp_tools():
     file_content = get_file_content(go_file_path, start_line=1, end_line=15)
     assert "OrderManager" in file_content
 
-    print("✅ 全部 FastMCP 工具多语言端到端验证通过！")
+    # 工具 5: 新增 CodeGraph 图谱工具
+    # 5.1 explore_codebase
+    from code_search_mcp.server import (
+        explore_codebase,
+        get_impact_radius,
+        get_symbol_callers,
+        get_symbol_callees,
+    )
+    explore_res = explore_codebase("用户登录认证与密码校验", path=sample_dir, top_k=2)
+    assert "login_api" in explore_res or "AuthService" in explore_res
+    assert "HTTP POST /api/v1/auth/login" in explore_res
+
+    # 5.2 get_symbol_callers
+    callers_res = get_symbol_callers("verify_password", path=sample_dir)
+    assert "AuthService.login" in callers_res
+
+    # 5.3 get_symbol_callees
+    callees_res = get_symbol_callees("login_api", path=sample_dir)
+    assert "login" in callees_res
+
+    # 5.4 get_impact_radius
+    impact_res = get_impact_radius("hash_password", path=sample_dir)
+    assert "HTTP POST /api/v1/auth/login" in impact_res
+    assert "login_api" in impact_res
+
+    print("✅ 全部 FastMCP 工具（包含 4 个 CodeGraph 图谱能力）端到端验证通过！")
+
+
+def test_codegraph_graph_engine():
+    print("\n--- 6. 测试 CodeGraph 代码知识图谱引擎核心能力 ---")
+    sample_dir = ROOT_DIR / "tests" / "sample_project"
+    from code_search_mcp.graph_engine import CodeGraphEngine
+
+    graph = CodeGraphEngine(sample_dir)
+    assert graph.load()
+
+    # 6.1 测试上游 Caller 追踪
+    callers = graph.get_callers("hash_password")
+    caller_symbols = [c["caller_symbol"] for c in callers["callers"]]
+    print(f"hash_password 的调用方: {caller_symbols}")
+    assert "PasswordHasher.verify_password" in caller_symbols
+    assert "AuthService.login" in caller_symbols
+    print("✅ Caller 上游调用链追踪通过！")
+
+    # 6.2 测试下游 Callee 依赖追踪
+    callees = graph.get_callees("AuthService.login")
+    callee_symbols = [c["target_symbol"] for c in callees["callees"]]
+    print(f"AuthService.login 调用的下级依赖: {callee_symbols}")
+    assert "hash_password" in callee_symbols
+    assert "verify_password" in callee_symbols
+    print("✅ Callee 下游依赖追踪通过！")
+
+    # 6.3 测试改动爆炸半径 / 影响面分析 (Blast Radius)
+    impact = graph.get_impact_radius("hash_password", max_depth=3)
+    impacted_symbols = [item["symbol"] for item in impact["impact_propagation_chain"]]
+    impacted_routes = [r["route"] for r in impact["impacted_external_routes"]]
+    print(f"hash_password 影响符号链: {impacted_symbols}")
+    print(f"hash_password 受波及外部路由: {impacted_routes}")
+    assert "PasswordHasher.verify_password" in impacted_symbols
+    assert "AuthService.login" in impacted_symbols
+    assert "login_api" in impacted_symbols
+    assert "HTTP POST /api/v1/auth/login" in impacted_routes
+    print("✅ Blast Radius 影响面与受波及路由分析通过！")
+
+    # 6.4 测试一键全链路探索 (explore_feature)
+    explore = graph.explore_feature("用户登录认证与密码加密校验", top_k=2)
+    md = explore["surgical_context_markdown"]
+    print("一键探索 Markdown 摘要预览:")
+    print(md[:400] + "\n...")
+    assert "HTTP POST /api/v1/auth/login" in md
+    assert "login_api" in md
+    print("✅ 一键直达手术级探索 (explore_feature) 验证通过！")
 
 
 if __name__ == "__main__":
@@ -157,5 +228,6 @@ if __name__ == "__main__":
     test_outline_generation()
     test_indexing_and_multilang_search()
     test_exact_ripgrep_search()
+    test_codegraph_graph_engine()
     test_mcp_tools()
-    print("\n🎉 组装 Tree-sitter 全语言代码智能版全部测试通过！")
+    print("\n🎉 吸收 CodeGraph 优秀设计后的全新版本测试 100% 全部通过！")

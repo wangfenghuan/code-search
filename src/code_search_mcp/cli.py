@@ -98,6 +98,28 @@ def main():
         help="最大结果数量（默认 20）",
     )
 
+    # explore 子命令 (一键手术级探索)
+    explore_parser = subparsers.add_parser("explore", help="一键直达全链路业务探索（CodeGraph 风格）")
+    explore_parser.add_argument("query", help="业务问题或功能描述")
+    explore_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
+    explore_parser.add_argument("--top-k", "-k", type=int, default=2, help="聚合的核心入口数（默认 2）")
+
+    # callers 子命令 (上游调用追踪)
+    callers_parser = subparsers.add_parser("callers", help="查询谁调用了指定函数或类")
+    callers_parser.add_argument("symbol", help="目标符号名称")
+    callers_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
+
+    # callees 子命令 (下游依赖追踪)
+    callees_parser = subparsers.add_parser("callees", help="查询指定函数直接调用的下游模块")
+    callees_parser.add_argument("symbol", help="目标符号名称")
+    callees_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
+
+    # impact 子命令 (改动影响面分析)
+    impact_parser = subparsers.add_parser("impact", help="改动影响面/爆炸半径分析")
+    impact_parser.add_argument("symbol", help="准备修改的目标符号")
+    impact_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
+    impact_parser.add_argument("--depth", "-d", type=int, default=3, help="追踪最大层级（默认 3）")
+
     # serve 子命令（默认或作为 MCP 启动）
     serve_parser = subparsers.add_parser("serve", help="以 MCP stdio 协议启动服务")
 
@@ -155,6 +177,49 @@ def main():
             max_results=args.max,
         )
         print(format_exact_results(res))
+
+    elif args.command == "explore":
+        from code_search_mcp.graph_engine import CodeGraphEngine
+        target = resolve_repo_path(args.path)
+        if not target or not target.exists():
+            print("错误: 未找到目标代码库", file=sys.stderr)
+            sys.exit(1)
+        engine = CodeGraphEngine(target)
+        res = engine.explore_feature(args.query, top_k=args.top_k)
+        if res.get("status") == "success":
+            print(res.get("surgical_context_markdown", ""))
+        else:
+            print(res.get("message", "探索失败"))
+
+    elif args.command == "callers":
+        from code_search_mcp.graph_engine import CodeGraphEngine, format_callers_markdown
+        target = resolve_repo_path(args.path)
+        if not target or not target.exists():
+            print("错误: 未找到目标代码库", file=sys.stderr)
+            sys.exit(1)
+        engine = CodeGraphEngine(target)
+        res = engine.get_callers(args.symbol)
+        print(format_callers_markdown(res))
+
+    elif args.command == "callees":
+        from code_search_mcp.graph_engine import CodeGraphEngine, format_callees_markdown
+        target = resolve_repo_path(args.path)
+        if not target or not target.exists():
+            print("错误: 未找到目标代码库", file=sys.stderr)
+            sys.exit(1)
+        engine = CodeGraphEngine(target)
+        res = engine.get_callees(args.symbol)
+        print(format_callees_markdown(res))
+
+    elif args.command == "impact":
+        from code_search_mcp.graph_engine import CodeGraphEngine, format_impact_markdown
+        target = resolve_repo_path(args.path)
+        if not target or not target.exists():
+            print("错误: 未找到目标代码库", file=sys.stderr)
+            sys.exit(1)
+        engine = CodeGraphEngine(target)
+        res = engine.get_impact_radius(args.symbol, max_depth=args.depth)
+        print(format_impact_markdown(res))
 
 
 if __name__ == "__main__":
