@@ -301,6 +301,11 @@ class CodeGraphEngine:
                 if mod:
                     by_mod_sym[(mod, short_name)].append(r)
 
+        by_qual_tail: Dict[str, List[Tuple[str, sqlite3.Row]]] = defaultdict(list)
+        for qual, qnodes in by_qual.items():
+            tail = qual.split(".")[-1]
+            by_qual_tail[tail].append((qual, qnodes[0]))
+
         raw_calls_cursor = conn.execute("""
             SELECT 
                 c.id, c.caller_id, c.caller_symbol, c.source_file,
@@ -340,9 +345,10 @@ class CodeGraphEngine:
                     conf = 1.0
 
             if not target_node and c_qual:
-                for qk, qnodes in by_qual.items():
+                c_tail = c_qual.split(".")[-1]
+                for qk, qnode in by_qual_tail.get(c_tail, []):
                     if qk.endswith(c_qual) or c_qual.endswith(qk):
-                        target_node = qnodes[0]
+                        target_node = qnode
                         res_type = "EXACT_QUALIFIED"
                         conf = 0.95
                         break
