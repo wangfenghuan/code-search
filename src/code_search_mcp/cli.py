@@ -120,6 +120,11 @@ def main():
     impact_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
     impact_parser.add_argument("--depth", "-d", type=int, default=3, help="追踪最大层级（默认 3）")
 
+    # watch 子命令 (实时热监控增量更新)
+    watch_parser = subparsers.add_parser("watch", help="启动前台实时热更新文件监控器")
+    watch_parser.add_argument("path", nargs="?", default="", help="代码库根目录路径（默认当前或最近索引项目）")
+    watch_parser.add_argument("--debounce", "-d", type=int, default=1500, help="防抖延迟毫秒数（默认 1500ms）")
+
     # serve 子命令（默认或作为 MCP 启动）
     serve_parser = subparsers.add_parser("serve", help="以 MCP stdio 协议启动服务")
 
@@ -220,6 +225,28 @@ def main():
         engine = CodeGraphEngine(target)
         res = engine.get_impact_radius(args.symbol, max_depth=args.depth)
         print(format_impact_markdown(res))
+
+    elif args.command == "watch":
+        import time
+        from code_search_mcp.watcher import RepoWatcher
+
+        target = resolve_repo_path(args.path)
+        if not target or not target.exists():
+            print("错误: 未找到目标代码库", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"📡 启动代码库实时热监控: {target}")
+        print(f"   防抖延迟: {args.debounce}ms | 监控语言: Python, TypeScript, JavaScript, Go")
+        print("   正在监听文件变动 (按 Ctrl+C 退出监控)...\n")
+
+        watcher = RepoWatcher(target, debounce_ms=args.debounce)
+        watcher.start()
+        try:
+            while watcher.is_running:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            watcher.stop()
+            print("\n👋 已安全停止监控")
 
 
 if __name__ == "__main__":

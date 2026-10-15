@@ -28,6 +28,10 @@
    - 原生支持 FastAPI / Flask / Express / NestJS / Go Gin 等主流 Web 框架路由解析。自动提取 `@router.post("/login")`、`router.POST(...)` 等路由信息并注入语义向量与图谱拓扑。
 9. **🔒 零外部服务与零污染存储**：
    - 嵌入式单文件运行，无需 Docker。数据库统一保存在 `~/.code-search-mcp/` 全局缓存，对被检索项目源码与 Git 状态零污染。
+10. **📡 实时热监听与毫秒级增量更新 (File Watcher & Incremental Sync)**：
+   - 彻底解决“代码修改后搜索滞后”痛点！基于操作系统原生内核事件通知（Windows `ReadDirectoryChangesW` / Linux `inotify` / macOS `FSEvents`）。
+   - 1500ms 智能防抖聚合连续保存，单文件变更 0.3s 内完成 Tree-sitter AST 抽取与 LanceDB 向量增量覆盖，无需全盘重建。
+   - 零输出污染，后台热监听日志严格流向 `sys.stderr`，绝不破坏 MCP JSON-RPC 协议通信。
 
 ---
 
@@ -140,7 +144,7 @@ claude mcp add code-search-mcp -- docker run -i --rm -v "$(pwd):/workspace:ro" -
 
 ---
 
-## 🧰 提供的 9 个核心 MCP 工具
+## 🧰 提供的 10 个核心 MCP 工具
 
 | 工具名 | 入参 | 适用场景与优势 |
 |---|---|---|
@@ -151,8 +155,9 @@ claude mcp add code-search-mcp -- docker run -i --rm -v "$(pwd):/workspace:ro" -
 | `get_codebase_outline` | `path: str = ""` | **【理清大项目首选】** 全局多语言骨架树与模块职责摘要（仅耗费 ~500 Token），避免盲目全盘搜索。 |
 | `exact_search` | `pattern: str`, `path: str = ""`, `is_regex: bool = False`, `file_glob: str = ""` | **【内置 ripgrep 确凿证据】** 0 毫秒精准查找变量、常量、错误码、配置 Key 或正则，返回 100% 确凿事实。 |
 | `search_codebase` | `query: str`, `path: str = ""`, `top_k: int = 5`, `compact: bool = True` | **【核心语义检索】** 混合自然语言与符号精准加权，跨 Python/TS/JS/Go 语言召回。默认 `compact=True` 极简预览，节省 75% Token。 |
+| `get_watch_status` | `path: str = ""` | **【实时热监听状态与同步历史】** 实时查看当前代码库热更新监控器运行状态、防抖延迟配置与最近 10 次增量更新事件。 |
 | `get_file_content` | `path: str`, `start_line: int`, `end_line: int` | **【精准展开】** 配合检索结果，按需深入阅读目标函数完整实现代码。 |
-| `index_codebase` | `path: str` | 扫描多语言目标项目，Tree-sitter 提取 AST、调用边、Web 路由并构建本地向量库与知识图。 |
+| `index_codebase` | `path: str` | 扫描多语言目标项目，Tree-sitter 提取 AST、调用边、Web 路由并构建本地向量库与知识图，自动激活后台实时热监听。 |
 
 ---
 
@@ -182,7 +187,10 @@ uv run main.py exact "PaymentGateway" --path /path/to/project
 # 7. 跨语言语义与符号混合搜索（紧凑模式）
 uv run main.py search "在线支付与订单退款" --path /path/to/project
 
-# 8. 作为 MCP stdio 服务启动
+# 8. 启动前台实时热更新文件监控器 (自动防抖增量更新)
+uv run main.py watch /path/to/project --debounce 1500
+
+# 9. 作为 MCP stdio 服务启动
 uv run main.py serve
 ```
 

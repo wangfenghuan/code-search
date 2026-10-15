@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,7 @@ from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
 from code_search_mcp.ripgrep_engine import ExactSearchEngine, format_exact_results
 from code_search_mcp.searcher import CodeSearcher, format_search_results, resolve_repo_path
+from code_search_mcp.watcher import get_or_create_watcher
 
 # 创建 FastMCP 实例
 mcp = FastMCP("code-search-mcp")
@@ -26,7 +28,7 @@ mcp = FastMCP("code-search-mcp")
 
 @mcp.tool()
 def index_codebase(path: str) -> str:
-    """扫描并索引指定路径下的 Python 代码库，生成用于语义搜索的向量数据库和项目架构大纲。
+    """扫描并索引指定路径下的多语言代码库，生成用于语义搜索的向量数据库和项目架构大纲，并自动激活后台实时热监听器。
 
     Args:
         path: 代码库的根目录路径（支持相对路径或绝对路径）
@@ -41,12 +43,17 @@ def index_codebase(path: str) -> str:
 
         indexer = CodeIndexer(repo_dir)
         res = indexer.index_all()
+
+        # 自动启动该仓库的后台实时热监听器，后续任意代码保存操作均自动毫秒级增量同步
+        get_or_create_watcher(repo_dir, auto_start=True)
+
         return (
             f"成功完成代码库索引！\n"
             f"- 目标路径: {res['repo_path']}\n"
-            f"- 扫描 Python 文件数: {res['indexed_files']}\n"
+            f"- 扫描多语言源文件数: {res['indexed_files']}\n"
             f"- 提取代码块数: {res['indexed_chunks']}\n"
-            f"提示: 可随时调用 `get_codebase_outline()` 查看全局架构大纲。"
+            f"- 📡 后台热更新监听器: 已启动 (监控 Python/TS/JS/Go，改动保存即刻增量生效)\n"
+            f"提示: 可随时调用 `get_codebase_outline()` 查看全局架构大纲，或使用 `get_watch_status()` 查看同步状态。"
         )
     except Exception as e:
         sys.stderr.write(f"[code-search-mcp] index_codebase 发生错误: {e}\n")
@@ -304,8 +311,65 @@ def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3) -> s
         return f"影响面分析失败: {str(e)}"
 
 
+@mcp.tool()
+def get_watch_status(path: str = "") -> str:
+    """获取代码库实时热监听器（Watcher）的运行状态与增量同步历史。
+    实时监控 Python/TS/JS/Go 源文件的保存与增删，毫秒级增量更新索引。
+
+    Args:
+        path: 代码库根目录路径（可选，默认当前项目）
+
+    Returns:
+        包含监听器状态、防抖配置、同步统计与最近事件的 Markdown 报告
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "错误: 未能推断或找到目标代码库路径。"
+
+        watcher = get_or_create_watcher(target_repo, auto_start=False)
+        is_active = watcher.is_running
+        status_badge = "🟢 正在运行 (Active)" if is_active else "⚪ 未启动 (Inactive)"
+
+        lines = [
+            "### 📡 代码库实时热监听状态 (Watch Status)",
+            f"- **监控仓库**: `{target_repo}`",
+            f"- **当前状态**: {status_badge}",
+            f"- **防抖延迟**: {watcher.debounce_ms} ms (连续保存聚合)",
+            f"- **已完成同步次数**: {watcher.sync_count} 次",
+            f"- **最近同步时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(watcher.last_sync_time)) if watcher.last_sync_time else '暂无变更同步'}",
+        ]
+
+        if not is_active:
+            lines.append("\n> 💡 提示: 监听器未启动。可调用 `index_codebase()` 建立索引并自动激活后台热监听。")
+        else:
+            lines.append("\n> ⚡ 提示: 当您在编辑器中保存代码时，后台将自动在 0.3s 内完成 AST 解析与向量增量同步，无需重新全量索引。")
+
+        if watcher.recent_events:
+            lines.append("\n#### ⏱️ 最近文件同步历史 (Recent Sync Events)")
+            lines.append("| 触发时间 | 变更文件 | 同步动作 | 提取代码块 |")
+            lines.append("| :--- | :--- | :--- | :--- |")
+            for ev in reversed(watcher.recent_events[-10:]):
+                action = "增量更新" if ev.get("status") == "updated" else "移除索引"
+                lines.append(f"| {ev.get('time')} | `{ev.get('file')}` | {action} | {ev.get('chunks', 0)} |")
+
+        return "\n".join(lines)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-mcp] get_watch_status 发生错误: {e}\n")
+        return f"获取监听状态失败: {str(e)}"
+
+
 def run_server():
-    """以标准 stdio 运行 FastMCP 服务"""
+    """以标准 stdio 运行 FastMCP 服务，并在启动时对已知仓库自动拉起热监听"""
+    try:
+        target_repo = resolve_repo_path("")
+        if target_repo and target_repo.exists():
+            db_dir = target_repo / ".code_search"
+            if db_dir.exists():
+                get_or_create_watcher(target_repo, auto_start=True)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-mcp] 服务启动自动拉起热监听异常: {e}\n")
+
     mcp.run()
 
 

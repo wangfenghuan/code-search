@@ -22,6 +22,7 @@ from code_search_mcp.server import (
     exact_search,
     get_codebase_outline,
     get_file_content,
+    get_watch_status,
     index_codebase,
     search_codebase,
 )
@@ -223,6 +224,93 @@ def test_codegraph_graph_engine():
     print("✅ 一键直达手术级探索 (explore_feature) 验证通过！")
 
 
+def test_incremental_indexing_and_watcher():
+    print("\n--- 7. 测试路线A：毫秒级增量热索引与文件热监听器 (Watcher) ---")
+    sample_dir = ROOT_DIR / "tests" / "sample_project"
+    temp_file = sample_dir / "temp_coupon_service.py"
+
+    indexer = CodeIndexer(sample_dir)
+    searcher = CodeSearcher(sample_dir)
+
+    # 1. 确保初始全量索引已就绪
+    if not searcher.is_indexed():
+        indexer.index_all()
+
+    # 清理遗留文件（如果有）
+    if temp_file.exists():
+        temp_file.unlink()
+        indexer.index_file_incremental(temp_file)
+
+    # 2. 模拟开发者新增一个 Python 文件
+    temp_file.write_text(
+        'def apply_coupon(order_id: str, coupon_code: str) -> float:\n'
+        '    """计算优惠券抵扣金额并应用至订单"""\n'
+        '    if coupon_code == "VIP99":\n'
+        '        return 99.0\n'
+        '    return 0.0\n',
+        encoding="utf-8",
+    )
+
+    # 执行增量热索引
+    res_add = indexer.index_file_incremental(temp_file)
+    print(f"新增文件增量更新结果: {res_add}")
+    assert res_add["status"] == "updated"
+    assert res_add["chunks_count"] >= 1
+
+    # 语义检索新增的函数
+    search_res = searcher.search("优惠券抵扣与折扣计算", top_k=2)
+    print("检索新增优惠券逻辑命中项:")
+    for r in search_res:
+        print(f"  [{r['language']}] {r['file_path']} -> {r['symbol_name']}")
+    assert any("temp_coupon_service.py" in r["file_path"] for r in search_res)
+    print("✅ 增量新增文件秒级索引与检索通过！")
+
+    # 3. 模拟开发者修改该文件（增加新接口）
+    temp_file.write_text(
+        'def apply_coupon(order_id: str, coupon_code: str) -> float:\n'
+        '    """计算优惠券抵扣金额并应用至订单"""\n'
+        '    return 50.0\n\n'
+        'def validate_coupon(coupon_code: str) -> bool:\n'
+        '    """验证优惠券有效性与过期时间"""\n'
+        '    return len(coupon_code) > 0\n',
+        encoding="utf-8",
+    )
+    res_mod = indexer.index_file_incremental(temp_file)
+    print(f"修改文件增量更新结果: {res_mod}")
+    assert res_mod["status"] == "updated"
+    assert res_mod["chunks_count"] >= 2
+
+    # 检索新接口
+    search_res_mod = searcher.search("验证优惠券有效性", top_k=2)
+    assert any("validate_coupon" in r["symbol_name"] for r in search_res_mod)
+    print("✅ 增量修改文件热更新与重新索引通过！")
+
+    # 4. 模拟开发者删除该文件
+    temp_file.unlink()
+    res_del = indexer.index_file_incremental(temp_file)
+    print(f"删除文件增量索引结果: {res_del}")
+    assert res_del["status"] == "deleted"
+
+    # 再次检索，应不再出现已删除文件
+    search_res_del = searcher.search("优惠券抵扣与折扣计算", top_k=5)
+    assert not any("temp_coupon_service.py" in r["file_path"] for r in search_res_del)
+    print("✅ 增量删除文件热更新与旧索引清除通过！")
+
+    # 5. 测试 RepoWatcher 与 get_watch_status MCP 工具
+    from code_search_mcp.watcher import get_or_create_watcher
+
+    status_inactive = get_watch_status(str(sample_dir))
+    assert "代码库实时热监听状态" in status_inactive
+
+    watcher = get_or_create_watcher(sample_dir, auto_start=True)
+    assert watcher.is_running
+    status_active = get_watch_status(str(sample_dir))
+    assert "正在运行" in status_active
+    watcher.stop()
+    assert not watcher.is_running
+    print("✅ 后台热监听器 (Watcher) 启停与 MCP 工具 get_watch_status 端到端通过！")
+
+
 if __name__ == "__main__":
     test_multilang_tree_sitter()
     test_outline_generation()
@@ -230,4 +318,5 @@ if __name__ == "__main__":
     test_exact_ripgrep_search()
     test_codegraph_graph_engine()
     test_mcp_tools()
-    print("\n🎉 吸收 CodeGraph 优秀设计后的全新版本测试 100% 全部通过！")
+    test_incremental_indexing_and_watcher()
+    print("\n🎉 全部单元与端到端测试 100% 全部通过！")

@@ -268,3 +268,100 @@ class CodeIndexer:
             "indexed_files": len(files),
             "indexed_chunks": total_chunks,
         }
+
+    def delete_file_from_index(self, file_path: str | Path) -> bool:
+        """从 LanceDB 中移除指定文件的所有切片记录"""
+        f = Path(file_path).resolve()
+        try:
+            rel_path = str(f.relative_to(self.repo_path)).replace("\\", "/")
+        except ValueError:
+            rel_path = str(f).replace("\\", "/")
+
+        if not self.db_path.exists():
+            return False
+
+        try:
+            db = lancedb.connect(str(self.db_path))
+            tbl = db.open_table("code_chunks")
+            safe_rel_path = rel_path.replace("'", "''")
+            tbl.delete(f"file_path = '{safe_rel_path}'")
+            return True
+        except Exception as e:
+            sys.stderr.write(f"[code-search-mcp] 从索引删除文件 {rel_path} 失败: {e}\n")
+            return False
+
+    def index_file_incremental(self, file_path: str | Path) -> Dict[str, Any]:
+        """单文件增量更新：先删除旧切片，再重新提取 AST、生成向量并插入 LanceDB"""
+        f = Path(file_path).resolve()
+        try:
+            rel_path = str(f.relative_to(self.repo_path)).replace("\\", "/")
+        except ValueError:
+            rel_path = str(f).replace("\\", "/")
+
+        # 1. 无论文件是修改还是删除，先清除旧切片
+        self.delete_file_from_index(f)
+
+        # 如果文件已不存在（被删除），更新大纲并直接返回
+        if not f.exists() or not f.is_file():
+            try:
+                ProjectOutlineGenerator(self.repo_path).generate()
+            except Exception:
+                pass
+            return {
+                "status": "deleted",
+                "file_path": rel_path,
+                "chunks_count": 0,
+            }
+
+        # 2. 重新解析新切片
+        chunker = UniversalCodeChunker(self.repo_path)
+        new_chunks = chunker.parse_file(f)
+        if not new_chunks:
+            return {
+                "status": "empty",
+                "file_path": rel_path,
+                "chunks_count": 0,
+            }
+
+        # 3. 向量化并插入 LanceDB
+        texts = [chunk.enriched_text for chunk in new_chunks]
+        vectors = self.embedding_engine.embed_documents(texts)
+
+        data = []
+        for chunk, vec in zip(new_chunks, vectors):
+            data.append(
+                {
+                    "id": chunk.id,
+                    "file_path": chunk.file_path,
+                    "full_path": chunk.full_path,
+                    "language": chunk.language,
+                    "symbol_name": chunk.symbol_name,
+                    "chunk_type": chunk.chunk_type,
+                    "start_line": chunk.start_line,
+                    "end_line": chunk.end_line,
+                    "code": chunk.code,
+                    "docstring": chunk.docstring or "",
+                    "decorators": chunk.decorators,
+                    "route_info": chunk.route_info,
+                    "enriched_text": chunk.enriched_text,
+                    "calls": chunk.calls,
+                    "vector": vec,
+                }
+            )
+
+        db = lancedb.connect(str(self.db_path))
+        tbl = db.open_table("code_chunks")
+        tbl.add(data)
+
+        # 4. 刷新大纲缓存
+        try:
+            ProjectOutlineGenerator(self.repo_path).generate()
+        except Exception:
+            pass
+
+        return {
+            "status": "updated",
+            "file_path": rel_path,
+            "chunks_count": len(new_chunks),
+        }
+
