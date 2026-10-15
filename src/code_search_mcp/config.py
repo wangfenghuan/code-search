@@ -6,6 +6,7 @@ from pathlib import Path
 DEFAULT_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 VECTOR_DIMENSION = 512
 DEFAULT_TOP_K = 5
+INDEX_SCHEMA_VERSION = "v2"
 
 # 忽略的目录和文件模式
 DEFAULT_IGNORE_DIRS = {

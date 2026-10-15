@@ -225,7 +225,7 @@ def explore_codebase(query: str, path: str = "", top_k: int = 2) -> str:
         if target_repo is None or not target_repo.exists():
             return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
 
-        engine = CodeGraphEngine(target_repo)
+        engine = CodeGraphEngine.get_instance(target_repo)
         res = engine.explore_feature(query=query, top_k=top_k)
         if res.get("status") == "success":
             return res.get("surgical_context_markdown", "")
@@ -252,7 +252,7 @@ def get_symbol_callers(symbol_name: str, path: str = "") -> str:
         if target_repo is None or not target_repo.exists():
             return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
 
-        engine = CodeGraphEngine(target_repo)
+        engine = CodeGraphEngine.get_instance(target_repo)
         res = engine.get_callers(symbol_name)
         return format_callers_markdown(res)
     except Exception as e:
@@ -277,7 +277,7 @@ def get_symbol_callees(symbol_name: str, path: str = "") -> str:
         if target_repo is None or not target_repo.exists():
             return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
 
-        engine = CodeGraphEngine(target_repo)
+        engine = CodeGraphEngine.get_instance(target_repo)
         res = engine.get_callees(symbol_name)
         return format_callees_markdown(res)
     except Exception as e:
@@ -303,7 +303,7 @@ def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3) -> s
         if target_repo is None or not target_repo.exists():
             return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
 
-        engine = CodeGraphEngine(target_repo)
+        engine = CodeGraphEngine.get_instance(target_repo)
         res = engine.get_impact_radius(symbol_name, max_depth=max_depth)
         return format_impact_markdown(res)
     except Exception as e:

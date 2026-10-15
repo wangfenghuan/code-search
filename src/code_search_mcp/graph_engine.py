@@ -1,4 +1,5 @@
 import json
+import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,8 +7,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import lancedb
 
-from code_search_mcp.config import get_repo_db_path
+from code_search_mcp.config import INDEX_SCHEMA_VERSION, get_repo_db_path
 from code_search_mcp.searcher import CodeSearcher
+
+_engine_cache: Dict[str, "CodeGraphEngine"] = {}
+_cache_lock = threading.Lock()
 
 
 @dataclass
@@ -22,6 +26,8 @@ class SymbolNode:
     docstring: str
     route_info: str
     calls: List[str]
+    module_name: str = ""
+    qualified_name: str = ""
 
 
 class CodeGraphEngine:
@@ -43,6 +49,34 @@ class CodeGraphEngine:
         self.routes_map: Dict[str, str] = {}
         self._loaded = False
 
+    @classmethod
+    def get_instance(cls, repo_path: str | Path) -> "CodeGraphEngine":
+        """获取或创建代码库对应的图引擎单例"""
+        resolved = str(Path(repo_path).resolve())
+        with _cache_lock:
+            if resolved not in _engine_cache:
+                engine = cls(resolved)
+                engine.load()
+                _engine_cache[resolved] = engine
+            return _engine_cache[resolved]
+
+    @classmethod
+    def invalidate_cache(cls, repo_path: str | Path):
+        """使指定仓库的图引擎缓存失效并重载最新数据"""
+        resolved = str(Path(repo_path).resolve())
+        with _cache_lock:
+            if resolved in _engine_cache:
+                _engine_cache[resolved].reload()
+
+    def reload(self) -> bool:
+        """重载 LanceDB 最新切片并重建内存拓扑图"""
+        self._loaded = False
+        self.nodes.clear()
+        self.all_nodes.clear()
+        self.callers_map.clear()
+        self.routes_map.clear()
+        return self.load()
+
     def load(self) -> bool:
         """加载 LanceDB 索引并构建符号调用拓扑图"""
         if self._loaded:
@@ -50,6 +84,16 @@ class CodeGraphEngine:
 
         if not self.db_path.exists():
             return False
+
+        # 校验版本控制
+        meta_file = self.db_path / "meta.json"
+        if meta_file.exists():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                if meta.get("schema_version") != INDEX_SCHEMA_VERSION:
+                    return False
+            except Exception:
+                pass
 
         try:
             db = lancedb.connect(str(self.db_path))
@@ -73,9 +117,17 @@ class CodeGraphEngine:
                     docstring=str(row.get("docstring", "")),
                     route_info=str(row.get("route_info", "")),
                     calls=calls_list,
+                    module_name=str(row.get("module_name", "")),
+                    qualified_name=str(row.get("qualified_name", "")),
                 )
                 self.all_nodes.append(node)
-                self.nodes[node.symbol_name].append(node)
+                # 1. 优先使用全限定名索引
+                if node.qualified_name:
+                    self.nodes[node.qualified_name].append(node)
+                # 2. 原符号名索引
+                if node.symbol_name:
+                    self.nodes[node.symbol_name].append(node)
+                # 3. 尾部短名索引
                 if "." in node.symbol_name:
                     short_name = node.symbol_name.split(".")[-1]
                     self.nodes[short_name].append(node)
@@ -93,6 +145,35 @@ class CodeGraphEngine:
         except Exception:
             return False
 
+    def disambiguate_target(
+        self, caller_file: str, called_name: str, candidates: List[SymbolNode]
+    ) -> Tuple[Optional[SymbolNode], bool, List[str]]:
+        """在存在同名符号时，按同限定名 > 同文件 > 同目录 > 唯一性 进行拓扑消歧，无法唯一消歧时标记 ambiguous"""
+        if not candidates:
+            return None, False, []
+        if len(candidates) == 1:
+            return candidates[0], False, []
+
+        # 1. 优先匹配完全相同的全限定名
+        exact_qname = [n for n in candidates if n.qualified_name == called_name]
+        if len(exact_qname) == 1:
+            return exact_qname[0], False, []
+
+        # 2. 优先同一文件
+        same_file = [n for n in candidates if n.file_path == caller_file]
+        if len(same_file) == 1:
+            return same_file[0], False, []
+
+        # 3. 优先同一目录
+        caller_dir = Path(caller_file).parent.as_posix()
+        same_dir = [n for n in candidates if Path(n.file_path).parent.as_posix() == caller_dir]
+        if len(same_dir) == 1:
+            return same_dir[0], False, []
+
+        # 4. 无法自动唯一消歧，返回第一个候选并标明歧义候选列表
+        cand_strs = [f"{n.qualified_name or n.symbol_name} ({n.file_path}#L{n.start_line})" for n in candidates]
+        return candidates[0], True, cand_strs
+
     def get_callers(self, symbol_name: str) -> Dict[str, Any]:
         """查询调用了指定符号的所有上游调用方 (Who calls X)"""
         if not self.load():
@@ -106,6 +187,16 @@ class CodeGraphEngine:
         target_keys = [symbol_name]
         if "." in symbol_name:
             target_keys.append(symbol_name.split(".")[-1])
+
+        is_defined_in_repo = any(k in self.nodes for k in target_keys)
+        def_nodes = self.nodes.get(symbol_name, [])
+        unique_defs = list({f"{n.file_path}:{n.start_line}": n for n in def_nodes}.values())
+        is_ambiguous_def = len(unique_defs) > 1
+        ambig_defs = (
+            [f"{n.qualified_name or n.symbol_name} ({n.file_path}#L{n.start_line})" for n in unique_defs]
+            if is_ambiguous_def
+            else []
+        )
 
         callers_seen: Set[str] = set()
         matched_callers: List[Dict[str, Any]] = []
@@ -134,6 +225,8 @@ class CodeGraphEngine:
         return {
             "status": "success",
             "target_symbol": symbol_name,
+            "defined_in_repo": is_defined_in_repo,
+            "ambiguous_definitions": ambig_defs,
             "callers_count": len(matched_callers),
             "callers": matched_callers,
         }
@@ -156,6 +249,9 @@ class CodeGraphEngine:
                 "callees": [],
             }
 
+        caller_node = nodes[0]
+        caller_file = caller_node.file_path
+
         all_calls = set()
         for n in nodes:
             all_calls.update(n.calls)
@@ -165,15 +261,18 @@ class CodeGraphEngine:
             # 尝试在索引中定位该符号的具体定义
             target_nodes = self.nodes.get(called, [])
             if target_nodes:
-                def_node = target_nodes[0]
+                def_node, is_ambiguous, candidate_list = self.disambiguate_target(caller_file, called, target_nodes)
                 callees_detail.append(
                     {
                         "target_symbol": called,
                         "defined_in_repo": True,
-                        "file_path": def_node.file_path,
-                        "symbol_type": def_node.chunk_type,
-                        "start_line": def_node.start_line,
-                        "docstring": def_node.docstring,
+                        "file_path": def_node.file_path if def_node else None,
+                        "qualified_name": def_node.qualified_name if def_node else "",
+                        "symbol_type": def_node.chunk_type if def_node else "symbol",
+                        "start_line": def_node.start_line if def_node else None,
+                        "docstring": def_node.docstring if def_node else "",
+                        "ambiguous": is_ambiguous,
+                        "candidates": candidate_list,
                     }
                 )
             else:
@@ -182,9 +281,12 @@ class CodeGraphEngine:
                         "target_symbol": called,
                         "defined_in_repo": False,
                         "file_path": None,
+                        "qualified_name": "",
                         "symbol_type": "external_or_builtin",
                         "start_line": None,
                         "docstring": "",
+                        "ambiguous": False,
+                        "candidates": [],
                     }
                 )
 
@@ -377,8 +479,16 @@ def format_callers_markdown(res: Dict[str, Any]) -> str:
     target = res.get("target_symbol", "")
     callers = res.get("callers", [])
     count = res.get("callers_count", 0)
+    is_defined = res.get("defined_in_repo", True)
 
     lines = [f"# 📞 符号上游调用方 (Callers): `{target}` (共 {count} 处调用)\n"]
+    ambig_defs = res.get("ambiguous_definitions", [])
+    if ambig_defs:
+        lines.append(f"> ⚠️ **同名符号多定义提示**: 符号名 `{target}` 在代码库中存在多处独立定义: {', '.join(ambig_defs)}。以下展示针对该名字的所有调用方。\n")
+
+    if not is_defined:
+        lines.append(f"> ⚠️ **提示**: 符号 `{target}` 在本地代码库中未检索到定义（可能属于第三方库、标准库或已被移除重构）。\n")
+
     if count == 0:
         lines.append("未发现任何显式调用该符号的上游模块（可能是顶级入口、外部暴露接口或未被直接引用的方法）。")
         return "\n".join(lines)
@@ -415,8 +525,13 @@ def format_callees_markdown(res: Dict[str, Any]) -> str:
         if in_repo:
             f_path = c.get('file_path')
             s_line = c.get('start_line')
+            qname = c.get('qualified_name')
+            qname_tag = f" (`{qname}`)" if qname and qname != sym else ""
             doc = f" — *{c.get('docstring')}*" if c.get('docstring') else ""
-            lines.append(f"- **{idx}. `{sym}`** ➡️ (定义于 `{f_path}`:L{s_line}){doc}")
+            ambig_note = ""
+            if c.get("ambiguous") and c.get("candidates"):
+                ambig_note = f"\n    ⚠️ *[重名歧义提示: 存在多处同名候选，当前推断为 `{f_path}:L{s_line}`; 备选: {', '.join(c['candidates'])}]*"
+            lines.append(f"- **{idx}. `{sym}`**{qname_tag} ➡️ (定义于 `{f_path}`:L{s_line}){doc}{ambig_note}")
         else:
             lines.append(f"- **{idx}. `{sym}`** (外部库依赖或内置函数)")
 

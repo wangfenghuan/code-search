@@ -2,6 +2,7 @@ import ast
 import json
 import os
 import sys
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,10 +13,13 @@ import lancedb
 from code_search_mcp.config import (
     DEFAULT_IGNORE_DIRS,
     DEFAULT_IGNORE_FILES,
+    DEFAULT_MODEL_NAME,
+    INDEX_SCHEMA_VERSION,
+    VECTOR_DIMENSION,
     get_repo_db_path,
 )
 from code_search_mcp.embeddings import EmbeddingEngine
-from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser
+from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser, get_module_name_from_path
 from code_search_mcp.outline import ProjectOutlineGenerator
 
 
@@ -35,6 +39,8 @@ class CodeChunk:
     route_info: str
     enriched_text: str
     calls: str = "[]"
+    module_name: str = ""
+    qualified_name: str = ""
 
 
 def build_enriched_text(
@@ -92,7 +98,7 @@ class UniversalCodeChunker:
         ext = file_path.suffix.lower()
         lang = EXTENSION_LANG_MAP.get(ext, "unknown")
 
-        symbols = self.ts_parser.parse_file(file_path)
+        symbols = self.ts_parser.parse_file(file_path, rel_path=rel_path)
         chunks: List[CodeChunk] = []
 
         if symbols:
@@ -124,6 +130,8 @@ class UniversalCodeChunker:
                         route_info=s.route_info,
                         enriched_text=enriched,
                         calls=json.dumps(s.calls or [], ensure_ascii=False),
+                        module_name=s.module_name,
+                        qualified_name=s.qualified_name,
                     )
                 )
         else:
@@ -143,6 +151,7 @@ class UniversalCodeChunker:
                         decorators="",
                         code=content,
                     )
+                    mod_name = get_module_name_from_path(rel_path)
                     chunks.append(
                         CodeChunk(
                             id=str(uuid.uuid4()),
@@ -159,6 +168,8 @@ class UniversalCodeChunker:
                             route_info="",
                             enriched_text=enriched,
                             calls="[]",
+                            module_name=mod_name,
+                            qualified_name=f"{mod_name}.[file]" if mod_name else "[file]",
                         )
                     )
             except Exception:
@@ -238,6 +249,8 @@ class CodeIndexer:
                     "route_info": chunk.route_info,
                     "enriched_text": chunk.enriched_text,
                     "calls": chunk.calls,
+                    "module_name": chunk.module_name or "",
+                    "qualified_name": chunk.qualified_name or "",
                     "vector": vec,
                 }
             )
@@ -248,18 +261,30 @@ class CodeIndexer:
         sys.stderr.write(f"[code-search-mcp] 正在持久化至 LanceDB ({self.db_path})...\n")
         table = db.create_table(table_name, data=data, mode="overwrite")
 
-        # 记录元信息
+        # 记录元信息 (包含版本控制与模型参数)
         meta_file = self.db_path / "meta.json"
         meta = {
+            "schema_version": INDEX_SCHEMA_VERSION,
+            "model_name": self.embedding_engine.model_name,
+            "vector_dimension": VECTOR_DIMENSION,
             "repo_path": str(self.repo_path),
             "indexed_files": len(files),
             "indexed_chunks": total_chunks,
+            "created_at": time.time(),
+            "last_updated": time.time(),
         }
         meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 记录最后索引路径
         last_repo_file = self.db_path.parent / "last_repo.txt"
         last_repo_file.write_text(str(self.repo_path), encoding="utf-8")
+
+        # 通知图引擎缓存失效
+        try:
+            from code_search_mcp.graph_engine import CodeGraphEngine
+            CodeGraphEngine.invalidate_cache(self.repo_path)
+        except Exception:
+            pass
 
         sys.stderr.write(f"[code-search-mcp] 索引构建完成！共 {len(files)} 文件，{total_chunks} 代码块\n")
         return {
@@ -269,9 +294,37 @@ class CodeIndexer:
             "indexed_chunks": total_chunks,
         }
 
+    def _sync_meta_stats(self, tbl=None):
+        """同步更新 meta.json 中的文件数与切片数，避免增量删改导致元数据脱节"""
+        meta_file = self.db_path / "meta.json"
+        if not meta_file.exists():
+            return
+        try:
+            if tbl is None:
+                db = lancedb.connect(str(self.db_path))
+                tbl = db.open_table("code_chunks")
+            total_chunks = len(tbl)
+            arrow_tbl = tbl.to_arrow()
+            if "file_path" in arrow_tbl.column_names:
+                unique_files = len(set(arrow_tbl.column("file_path").to_pylist()))
+            else:
+                unique_files = 0
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            meta["indexed_files"] = unique_files
+            meta["indexed_chunks"] = total_chunks
+            meta["last_updated"] = time.time()
+            meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     def delete_file_from_index(self, file_path: str | Path) -> bool:
-        """从 LanceDB 中移除指定文件的所有切片记录"""
-        f = Path(file_path).resolve()
+        """从 LanceDB 中移除指定文件或目录下的所有切片记录（支持单文件与文件夹前缀递归清理）"""
+        p = Path(file_path)
+        if not p.is_absolute():
+            f = (self.repo_path / p).resolve()
+        else:
+            f = p.resolve()
+
         try:
             rel_path = str(f.relative_to(self.repo_path)).replace("\\", "/")
         except ValueError:
@@ -284,7 +337,15 @@ class CodeIndexer:
             db = lancedb.connect(str(self.db_path))
             tbl = db.open_table("code_chunks")
             safe_rel_path = rel_path.replace("'", "''")
-            tbl.delete(f"file_path = '{safe_rel_path}'")
+            # 同时支持单文件完全匹配与子目录前缀匹配，彻底消除目录重命名/删除孤儿数据
+            tbl.delete(f"file_path = '{safe_rel_path}' OR file_path LIKE '{safe_rel_path}/%'")
+            self._sync_meta_stats(tbl)
+
+            try:
+                from code_search_mcp.graph_engine import CodeGraphEngine
+                CodeGraphEngine.invalidate_cache(self.repo_path)
+            except Exception:
+                pass
             return True
         except Exception as e:
             sys.stderr.write(f"[code-search-mcp] 从索引删除文件 {rel_path} 失败: {e}\n")
@@ -292,7 +353,12 @@ class CodeIndexer:
 
     def index_file_incremental(self, file_path: str | Path) -> Dict[str, Any]:
         """单文件增量更新：先删除旧切片，再重新提取 AST、生成向量并插入 LanceDB"""
-        f = Path(file_path).resolve()
+        p = Path(file_path)
+        if not p.is_absolute():
+            f = (self.repo_path / p).resolve()
+        else:
+            f = p.resolve()
+
         try:
             rel_path = str(f.relative_to(self.repo_path)).replace("\\", "/")
         except ValueError:
@@ -301,10 +367,15 @@ class CodeIndexer:
         # 1. 无论文件是修改还是删除，先清除旧切片
         self.delete_file_from_index(f)
 
-        # 如果文件已不存在（被删除），更新大纲并直接返回
+        # 如果文件已不存在（被删除），更新大纲和图缓存并直接返回
         if not f.exists() or not f.is_file():
             try:
                 ProjectOutlineGenerator(self.repo_path).generate()
+            except Exception:
+                pass
+            try:
+                from code_search_mcp.graph_engine import CodeGraphEngine
+                CodeGraphEngine.invalidate_cache(self.repo_path)
             except Exception:
                 pass
             return {
@@ -317,6 +388,15 @@ class CodeIndexer:
         chunker = UniversalCodeChunker(self.repo_path)
         new_chunks = chunker.parse_file(f)
         if not new_chunks:
+            try:
+                ProjectOutlineGenerator(self.repo_path).generate()
+            except Exception:
+                pass
+            try:
+                from code_search_mcp.graph_engine import CodeGraphEngine
+                CodeGraphEngine.invalidate_cache(self.repo_path)
+            except Exception:
+                pass
             return {
                 "status": "empty",
                 "file_path": rel_path,
@@ -345,6 +425,8 @@ class CodeIndexer:
                     "route_info": chunk.route_info,
                     "enriched_text": chunk.enriched_text,
                     "calls": chunk.calls,
+                    "module_name": chunk.module_name or "",
+                    "qualified_name": chunk.qualified_name or "",
                     "vector": vec,
                 }
             )
@@ -352,10 +434,16 @@ class CodeIndexer:
         db = lancedb.connect(str(self.db_path))
         tbl = db.open_table("code_chunks")
         tbl.add(data)
+        self._sync_meta_stats(tbl)
 
-        # 4. 刷新大纲缓存
+        # 4. 刷新大纲缓存与图引擎缓存
         try:
             ProjectOutlineGenerator(self.repo_path).generate()
+        except Exception:
+            pass
+        try:
+            from code_search_mcp.graph_engine import CodeGraphEngine
+            CodeGraphEngine.invalidate_cache(self.repo_path)
         except Exception:
             pass
 

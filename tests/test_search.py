@@ -311,6 +311,170 @@ def test_incremental_indexing_and_watcher():
     print("✅ 后台热监听器 (Watcher) 启停与 MCP 工具 get_watch_status 端到端通过！")
 
 
+def test_phase0_fixes():
+    print("\n--- 8. 测试 Phase 0 核心修复：语言内置过滤隔离、Schema 版本控制、前缀删除与元数据同步 ---")
+    sample_dir = ROOT_DIR / "tests" / "sample_project"
+    indexer = CodeIndexer(sample_dir)
+    res = indexer.index_all()
+    assert res["status"] == "success"
+
+    # 1. 验证按语言隔离的内置过滤 (Fix #4)
+    from code_search_mcp.multilang_parser import TreeSitterParser
+    parser = TreeSitterParser()
+    py_code = b"""
+def demo_func():
+    make()
+    open("a.txt")
+    sum([1, 2])
+"""
+    symbols = parser.parse_code(py_code, "demo.py", "python")
+    calls = symbols[0].calls
+    print(f"Python 提取调用列表: {calls}")
+    assert "make" in calls, "Python 自定义 make() 不应被过滤"
+    assert "open" not in calls, "Python 内置 open 应该被过滤"
+    assert "sum" not in calls, "Python 内置 sum 应该被过滤"
+
+    # 验证 JS console.log 修复
+    js_code = b"""
+function testLog() {
+    console.log("hello");
+    console.error("error");
+    customLog("message");
+}
+"""
+    js_symbols = parser.parse_code(js_code, "test.js", "javascript")
+    js_calls = js_symbols[0].calls
+    print(f"JavaScript 提取调用列表: {js_calls}")
+    assert "customLog" in js_calls
+    assert "log" not in js_calls, "console.log 中的 log 应该被过滤"
+    assert "error" not in js_calls, "console.error 中的 error 应该被过滤"
+    print("✅ 语言内置过滤隔离与 console.log 修复通过！")
+
+    # 2. 验证 Schema 版本控制 (Fix #16)
+    import json
+    from code_search_mcp.config import INDEX_SCHEMA_VERSION, get_repo_db_path
+    from code_search_mcp.searcher import CodeSearcher
+    meta_path = get_repo_db_path(sample_dir) / "meta.json"
+    meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta_data.get("schema_version") == INDEX_SCHEMA_VERSION
+    assert meta_data.get("indexed_files") >= 5
+    assert meta_data.get("indexed_chunks") >= 20
+
+    # 模拟旧版本 schema
+    meta_data["schema_version"] = "v0_incompatible"
+    meta_path.write_text(json.dumps(meta_data), encoding="utf-8")
+    searcher = CodeSearcher(sample_dir)
+    assert not searcher.is_indexed(), "旧版本 schema 应被判定为未索引/不兼容"
+
+    # 恢复索引
+    indexer.index_all()
+    assert searcher.is_indexed()
+    print("✅ Schema 版本校验与模型兼容机制通过！")
+
+    # 3. 验证文件夹级前缀删除与元数据同步 (Fix #14)
+    sub_dir = sample_dir / "temp_subpkg"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    f1 = sub_dir / "mod_a.py"
+    f2 = sub_dir / "mod_b.py"
+    f1.write_text("def sub_func_a(): pass\n", encoding="utf-8")
+    f2.write_text("def sub_func_b(): pass\n", encoding="utf-8")
+
+    indexer.index_file_incremental(f1)
+    indexer.index_file_incremental(f2)
+
+    meta_after_add = json.loads(meta_path.read_text(encoding="utf-8"))
+    files_count_add = meta_after_add["indexed_files"]
+
+    # 递归删除整个 temp_subpkg 目录
+    f1.unlink()
+    f2.unlink()
+    sub_dir.rmdir()
+
+    indexer.delete_file_from_index("temp_subpkg")
+    meta_after_del = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta_after_del["indexed_files"] < files_count_add, "删除文件夹后文件统计应同步减少"
+    print("✅ 文件夹级递归前缀删除与元数据同步通过！")
+
+    # 4. 验证 get_callers 对已删除/外部符号的明确提示 (Fix #13, #15)
+    from code_search_mcp.graph_engine import CodeGraphEngine, format_callers_markdown
+    graph = CodeGraphEngine.get_instance(sample_dir)
+    res_external = graph.get_callers("non_existent_function_xyz")
+    assert not res_external["defined_in_repo"]
+    md = format_callers_markdown(res_external)
+    assert "未检索到定义" in md
+    print("✅ 符号存在性校验与未定义提示通过！")
+
+
+def test_phase1_fixes():
+    print("\n--- 9. 测试 Phase 1: 跨文件 Import 解析、模块全限定名与拓扑消歧 ---")
+    import shutil
+    import tempfile
+    from code_search_mcp.multilang_parser import TreeSitterParser
+    from code_search_mcp.indexer import CodeIndexer
+    from code_search_mcp.graph_engine import CodeGraphEngine, format_callees_markdown, format_callers_markdown
+
+    # 1. 验证跨文件 Import 与类型实例化推断
+    parser = TreeSitterParser()
+    py_code = (
+        b"from auth.service import AuthService, hash_password as hp\n"
+        b"auth_service = AuthService()\n"
+        b"def handle_login(req):\n"
+        b"    auth_service.login(req)\n"
+        b"    hp(req.password)\n"
+    )
+    syms = parser.parse_code(py_code, file_name="routes/auth.py", lang="python")
+    login_fn = [s for s in syms if s.name == "handle_login"][0]
+    assert "login" in login_fn.calls
+    assert "auth.service.AuthService.login" in login_fn.calls, "应推断出 AuthService.login 的跨文件限定调用"
+    assert "hp" in login_fn.calls
+    assert "auth.service.hash_password" in login_fn.calls, "应通过 alias hp 解析出原函数限定调用"
+    assert login_fn.qualified_name == "routes.auth.handle_login"
+    print("✅ 跨文件 Import 与实例变量限定调用解析通过！")
+
+    # 2. 验证多文件同名符号拓扑消歧 (同目录优先 vs 跨模块歧义)
+    test_dir = Path(tempfile.mkdtemp(prefix="test_disambig_"))
+    try:
+        user_dir = test_dir / "user"
+        order_dir = test_dir / "order"
+        user_dir.mkdir(parents=True)
+        order_dir.mkdir(parents=True)
+
+        (user_dir / "service.py").write_text("def process():\n    return 'user'\n", encoding="utf-8")
+        (user_dir / "controller.py").write_text("def run_user():\n    process()\n", encoding="utf-8")
+        (order_dir / "service.py").write_text("def process():\n    return 'order'\n", encoding="utf-8")
+        (test_dir / "main.py").write_text("def global_run():\n    process()\n", encoding="utf-8")
+
+        indexer = CodeIndexer(test_dir)
+        indexer.index_all()
+
+        graph = CodeGraphEngine.get_instance(test_dir)
+
+        # 2.1 user/controller.py 里的 process 应该消歧为 user/service.py (同目录优先)
+        callees_user = graph.get_callees("run_user")
+        assert callees_user["status"] == "success"
+        matched_callee = [c for c in callees_user["callees"] if c["target_symbol"] == "process"][0]
+        assert not matched_callee["ambiguous"], "同目录符号应自动唯一消歧"
+        assert "user" in matched_callee["file_path"]
+
+        # 2.2 main.py 里的 process 处于不同目录，有两个候选，应标记 ambiguous
+        callees_main = graph.get_callees("global_run")
+        assert callees_main["status"] == "success"
+        matched_main_callee = [c for c in callees_main["callees"] if c["target_symbol"] == "process"][0]
+        assert matched_main_callee["ambiguous"], "跨模块同名候选应标记 ambiguous"
+        assert len(matched_main_callee["candidates"]) == 2
+        md_callees = format_callees_markdown(callees_main)
+        assert "重名歧义提示" in md_callees
+
+        # 2.3 get_callers 探测 process 时提示多重定义
+        callers_res = graph.get_callers("process")
+        assert len(callers_res["ambiguous_definitions"]) == 2
+        md_callers = format_callers_markdown(callers_res)
+        assert "同名符号多定义提示" in md_callers
+        print("✅ 同名符号拓扑消歧 (同文件/同目录消歧 + 歧义报警) 端到端通过！")
+    finally:
+        shutil.rmtree(test_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_multilang_tree_sitter()
     test_outline_generation()
@@ -319,4 +483,7 @@ if __name__ == "__main__":
     test_codegraph_graph_engine()
     test_mcp_tools()
     test_incremental_indexing_and_watcher()
+    test_phase0_fixes()
+    test_phase1_fixes()
     print("\n🎉 全部单元与端到端测试 100% 全部通过！")
+

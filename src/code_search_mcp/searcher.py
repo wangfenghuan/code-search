@@ -7,7 +7,12 @@ from typing import Any, Dict, List, Optional
 
 import lancedb
 
-from code_search_mcp.config import get_db_dir, get_repo_db_path
+from code_search_mcp.config import (
+    DEFAULT_MODEL_NAME,
+    INDEX_SCHEMA_VERSION,
+    get_db_dir,
+    get_repo_db_path,
+)
 from code_search_mcp.embeddings import EmbeddingEngine
 
 
@@ -116,8 +121,15 @@ class CodeSearcher:
         if not meta_file.exists():
             return False
         try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            # 校验 schema 版本与模型一致性，旧版本或模型不兼容时返回 False 触发重建
+            if meta.get("schema_version") != INDEX_SCHEMA_VERSION:
+                return False
+            if meta.get("model_name") != DEFAULT_MODEL_NAME:
+                return False
             db = lancedb.connect(str(self.db_path))
-            return "code_chunks" in db.table_names()
+            tbl = db.open_table("code_chunks")
+            return len(tbl) > 0
         except Exception:
             return False
 
