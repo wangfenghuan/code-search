@@ -166,11 +166,13 @@ class CodeSearcher:
             # 符号与关键词增强
             boost = calculate_symbol_boost(query, symbol_name, file_path, route_info)
             final_score = round(min(base_sim * (1.0 + boost), 1.0), 4)
+            language = r.get("language", "code")
 
             scored_candidates.append(
                 {
                     "file_path": file_path,
                     "full_path": r.get("full_path"),
+                    "language": language,
                     "symbol_name": symbol_name,
                     "chunk_type": r.get("chunk_type"),
                     "start_line": int(r.get("start_line", 1)),
@@ -197,6 +199,7 @@ def format_search_results(results: List[Dict[str, Any]], query: str, compact: bo
     for i, item in enumerate(results, start=1):
         rel_path = item["file_path"]
         symbol = item["symbol_name"]
+        lang = item.get("language", "code")
         start_l = item["start_line"]
         end_l = item["end_line"]
         sim = item["similarity"]
@@ -205,7 +208,7 @@ def format_search_results(results: List[Dict[str, Any]], query: str, compact: bo
         doc = item.get("docstring", "").strip()
         code = item["code"].strip()
 
-        header_tags = [f"得分: {sim}", f"类型: {chunk_type}"]
+        header_tags = [f"语言: {lang}", f"得分: {sim}", f"类型: {chunk_type}"]
         if route:
             header_tags.append(f"接口: `{route}`")
 

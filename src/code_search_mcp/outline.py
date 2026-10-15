@@ -1,4 +1,3 @@
-import ast
 import json
 import os
 import sys
@@ -6,96 +5,94 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from code_search_mcp.config import DEFAULT_IGNORE_DIRS, DEFAULT_IGNORE_FILES, get_repo_db_path
+from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser
 
 
 class ProjectOutlineGenerator:
-    """提取代码库的轻量级全局架构大纲（骨架树），供 AI 极省 Token 地理清项目拓扑"""
+    """提取多语言代码库的轻量级全局架构大纲（骨架树），供 AI 极省 Token 地理清项目拓扑"""
 
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path.resolve()
         self.db_path = get_repo_db_path(self.repo_path)
+        self.parser = TreeSitterParser()
 
     def extract_file_skeleton(self, file_path: Path) -> Optional[Dict[str, Any]]:
-        """从单个 Python 文件中提取精简模块签名"""
+        """从多语言源文件中提取精简模块签名"""
         try:
             rel_path = str(file_path.relative_to(self.repo_path)).replace("\\", "/")
         except ValueError:
             rel_path = str(file_path).replace("\\", "/")
 
-        try:
-            source = file_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+        ext = file_path.suffix.lower()
+        lang = EXTENSION_LANG_MAP.get(ext, "unknown")
+
+        symbols = self.parser.parse_file(file_path)
+        if not symbols:
             return None
 
-        if not source.strip():
-            return None
+        # 提取文件级概要（如果第一个符号有注释，或者从顶部注释推断）
+        file_summary = ""
+        for s in symbols:
+            if s.docstring:
+                file_summary = s.docstring.split("\n")[0].strip()
+                break
 
-        try:
-            tree = ast.parse(source, filename=str(file_path))
-        except SyntaxError:
-            return {
-                "rel_path": rel_path,
-                "summary": "（语法解析异常文件）",
-                "classes": [],
-                "functions": [],
-            }
+        classes_map: Dict[str, Dict[str, Any]] = {}
+        functions: List[Dict[str, Any]] = []
 
-        # 提取模块 Docstring 第一句作为模块职责摘要
-        raw_doc = ast.get_docstring(tree) or ""
-        module_summary = raw_doc.strip().split("\n")[0] if raw_doc.strip() else ""
-
-        classes = []
-        functions = []
-
-        for node in tree.body:
-            if isinstance(node, ast.ClassDef):
-                cls_doc = ast.get_docstring(node) or ""
-                cls_summary = cls_doc.strip().split("\n")[0] if cls_doc.strip() else ""
-                methods = []
-                for item in node.body:
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        methods.append(item.name)
-                classes.append(
-                    {
-                        "name": node.name,
-                        "summary": cls_summary,
-                        "methods": methods,
-                    }
-                )
-
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                fn_doc = ast.get_docstring(node) or ""
-                fn_summary = fn_doc.strip().split("\n")[0] if fn_doc.strip() else ""
-                # 检查是否有常见路由装饰器
-                route_tag = ""
-                for dec in node.decorator_list:
-                    dec_str = ast.unparse(dec)
-                    if any(kw in dec_str for kw in [".get(", ".post(", ".put(", ".delete(", ".route("]):
-                        route_tag = dec_str
-                        break
-
+        for sym in symbols:
+            if sym.symbol_type in ("class", "struct", "interface"):
+                classes_map[sym.name] = {
+                    "name": sym.name,
+                    "type": sym.symbol_type,
+                    "summary": sym.docstring.split("\n")[0].strip() if sym.docstring else "",
+                    "methods": [],
+                }
+            elif sym.symbol_type == "method":
+                # 分离 ClassName.methodName
+                if "." in sym.name:
+                    cls_name, m_name = sym.name.split(".", 1)
+                    if cls_name not in classes_map:
+                        classes_map[cls_name] = {
+                            "name": cls_name,
+                            "type": "class",
+                            "summary": "",
+                            "methods": [],
+                        }
+                    classes_map[cls_name]["methods"].append(m_name)
+                else:
+                    functions.append(
+                        {
+                            "name": sym.name,
+                            "summary": sym.docstring.split("\n")[0].strip() if sym.docstring else "",
+                            "route": sym.route_info,
+                        }
+                    )
+            elif sym.symbol_type == "function":
                 functions.append(
                     {
-                        "name": node.name,
-                        "summary": fn_summary,
-                        "route": route_tag,
+                        "name": sym.name,
+                        "summary": sym.docstring.split("\n")[0].strip() if sym.docstring else "",
+                        "route": sym.route_info,
                     }
                 )
 
         return {
             "rel_path": rel_path,
-            "summary": module_summary,
-            "classes": classes,
+            "language": lang,
+            "summary": file_summary,
+            "classes": list(classes_map.values()),
             "functions": functions,
         }
 
     def generate(self) -> Dict[str, Any]:
-        """生成整个项目的架构大纲字典"""
+        """生成整个项目的多语言架构大纲字典"""
         files_info = []
         for root, dirs, files in os.walk(self.repo_path):
             dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")]
             for file in sorted(files):
-                if file.endswith(".py") and file not in DEFAULT_IGNORE_FILES:
+                ext = Path(file).suffix.lower()
+                if ext in EXTENSION_LANG_MAP and file not in DEFAULT_IGNORE_FILES:
                     full_p = Path(root) / file
                     info = self.extract_file_skeleton(full_p)
                     if info:
@@ -127,29 +124,31 @@ class ProjectOutlineGenerator:
         return self.generate()
 
     def format_as_markdown(self, outline: Dict[str, Any], max_depth: int = 3) -> str:
-        """将架构大纲转化为紧凑、结构分明、极度节省 Token 的 Markdown 文本"""
+        """将多语言架构大纲转化为紧凑结构、极省 Token 的 Markdown"""
         repo_name = outline.get("repo_name", "项目")
         total_modules = outline.get("total_modules", 0)
         lines = [
-            f"# 🏛️ 项目全局架构大纲: {repo_name} (共 {total_modules} 个核心模块)\n",
-            "> 💡 **使用提示**: 此大纲展示项目模块职责与暴露符号。请优先根据大纲定位模块，再使用 `search_codebase` 或 `get_file_content` 精准查看细节。\n",
+            f"# 🏛️ 项目全局多语言架构大纲: {repo_name} (共 {total_modules} 个核心源文件)\n",
+            "> 💡 **使用提示**: 此大纲展示项目所有 Python/TS/JS/Go 模块职责与暴露符号。请优先根据大纲定位模块，再使用 `search_codebase` 或 `exact_search` 精准查看细节。\n",
         ]
 
         modules = outline.get("modules", [])
         for mod in modules:
             rel_p = mod["rel_path"]
+            lang = mod.get("language", "code")
             summary = f" — *{mod['summary']}*" if mod.get("summary") else ""
-            lines.append(f"### 📄 `{rel_p}`{summary}")
+            lines.append(f"### 📄 `[{lang}]` `{rel_p}`{summary}")
 
             classes = mod.get("classes", [])
             for c in classes:
                 c_name = c["name"]
+                c_type = c.get("type", "class")
                 c_sum = f" ({c['summary']})" if c.get("summary") else ""
                 methods_str = ", ".join(f"`{m}()`" for m in c.get("methods", []))
                 if methods_str:
-                    lines.append(f"  - **类** `{c_name}`{c_sum} 包含方法: {methods_str}")
+                    lines.append(f"  - **{c_type}** `{c_name}`{c_sum} 包含方法: {methods_str}")
                 else:
-                    lines.append(f"  - **类** `{c_name}`{c_sum}")
+                    lines.append(f"  - **{c_type}** `{c_name}`{c_sum}")
 
             functions = mod.get("functions", [])
             for fn in functions:
