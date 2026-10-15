@@ -1,0 +1,5 @@
+# Treat Windows binaries as binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary

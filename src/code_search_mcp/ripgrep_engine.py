@@ -20,13 +20,25 @@ class MatchItem:
 
 
 def find_system_ripgrep() -> Optional[str]:
-    """探测系统环境变量或主流 IDE (VS Code / Cursor) 中内置的 ripgrep (rg) 二进制"""
-    # 1. 优先查系统 PATH
+    """探测 ripgrep (rg) 二进制：
+    1. 优先使用项目自带预编译二进制 (src/code_search_mcp/bin/rg[.exe])，零配置开箱即用
+    2. 检查系统 PATH 环境变量
+    3. 检查常见安装路径与主流开发工具 (VS Code / Cursor 内置模块)
+    """
+    # 1. 优先查本包自带预编译二进制
+    bin_dir = Path(__file__).resolve().parent / "bin"
+    bundled_names = ["rg.exe", "rg"]
+    for name in bundled_names:
+        bundled_rg = bin_dir / name
+        if bundled_rg.exists() and bundled_rg.is_file():
+            return str(bundled_rg)
+
+    # 2. 查系统 PATH
     rg_in_path = shutil.which("rg") or shutil.which("rg.exe")
     if rg_in_path:
         return rg_in_path
 
-    # 2. 检查常见安装路径与开发工具
+    # 3. 检查常见安装路径与开发工具
     user_home = Path.home()
     candidate_paths = [
         user_home / ".cargo" / "bin" / "rg.exe",
