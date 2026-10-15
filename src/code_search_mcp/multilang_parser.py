@@ -1,3 +1,4 @@
+import bisect
 import re
 import sys
 import uuid
@@ -5,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
-from tree_sitter import Language, Node, Parser
+from tree_sitter import Language, Node, Parser, Query, QueryCursor
 
 # 多语言内置函数与标准库高频方法过滤表（按语言精准隔离，消除跨语言误伤）
 PYTHON_BUILTINS: Set[str] = {
@@ -156,7 +157,7 @@ def get_leading_comment(node: Node, source_bytes: bytes) -> str:
 
 
 class TreeSitterParser:
-    """工业级 Tree-sitter 多语言代码解析器"""
+    """工业级 Tree-sitter 多语言代码解析器 (基于 Tree-sitter Query S-expression 与微秒级线段树映射)"""
 
     def __init__(self):
         self._parsers: Dict[str, Parser] = {}
@@ -168,6 +169,57 @@ class TreeSitterParser:
             self._parsers["typescript"] = Parser(TS_LANG)
         if GO_LANG:
             self._parsers["go"] = Parser(GO_LANG)
+
+        # 预编译查询 (Tree-sitter Query S-expressions)
+        self._py_class_query = Query(PY_LANG, "(class_definition name: (identifier) @cls.name) @cls.def") if PY_LANG else None
+        self._py_fn_query = Query(PY_LANG, "(function_definition name: (identifier) @fn.name) @fn.def") if PY_LANG else None
+        self._py_calls_query = Query(PY_LANG, """
+        (call function: (identifier) @call.ident) @call.root
+        (call function: (attribute object: (_) @call.obj attribute: (identifier) @call.attr)) @call.root
+        (call function: (subscript value: (_) @call.sub_val subscript: (_) @call.sub_key)) @call.root
+        (call function: (call function: (identifier) @call.chained_fn arguments: (argument_list) @call.chained_args)) @call.root
+        """) if PY_LANG else None
+
+        self._ts_class_query = Query(TS_LANG, "(class_declaration name: (type_identifier) @cls.name) @cls.def") if TS_LANG else None
+        self._ts_defs_query = Query(TS_LANG, """
+        (function_declaration name: (identifier) @fn.name) @fn.def
+        (method_definition name: (property_identifier) @method.name) @method.def
+        (public_field_definition name: (property_identifier) @field.name) @field.def
+        (lexical_declaration (variable_declarator name: (identifier) @var.name value: [(arrow_function) (function_expression)])) @var.def
+        (variable_declaration (variable_declarator name: (identifier) @var.name value: [(arrow_function) (function_expression)])) @var.def
+        """) if TS_LANG else None
+        self._ts_calls_query = Query(TS_LANG, """
+        (call_expression function: (identifier) @call.ident) @call.root
+        (call_expression function: (member_expression object: (_) @call.obj property: (property_identifier) @call.prop)) @call.root
+        (call_expression function: (subscript_expression object: (_) @call.obj index: (_) @call.idx)) @call.root
+        """) if TS_LANG else None
+
+        self._js_class_query = Query(JS_LANG, "(class_declaration name: (identifier) @cls.name) @cls.def") if JS_LANG else None
+        self._js_defs_query = Query(JS_LANG, """
+        (function_declaration name: (identifier) @fn.name) @fn.def
+        (method_definition name: (property_identifier) @method.name) @method.def
+        (lexical_declaration (variable_declarator name: (identifier) @var.name value: [(arrow_function) (function_expression)])) @var.def
+        (variable_declaration (variable_declarator name: (identifier) @var.name value: [(arrow_function) (function_expression)])) @var.def
+        """) if JS_LANG else None
+        self._js_calls_query = Query(JS_LANG, """
+        (call_expression function: (identifier) @call.ident) @call.root
+        (call_expression function: (member_expression object: (_) @call.obj property: (property_identifier) @call.prop)) @call.root
+        (call_expression function: (subscript_expression object: (_) @call.obj index: (_) @call.idx)) @call.root
+        """) if JS_LANG else None
+
+        self._go_types_query = Query(GO_LANG, """
+        (type_spec name: (type_identifier) @type.name type: (struct_type)) @struct.def
+        (type_spec name: (type_identifier) @type.name type: (interface_type)) @iface.def
+        """) if GO_LANG else None
+        self._go_defs_query = Query(GO_LANG, """
+        (function_declaration name: (identifier) @fn.name) @fn.def
+        (method_declaration receiver: (parameter_list) @method.recv name: (field_identifier) @method.name) @method.def
+        """) if GO_LANG else None
+        self._go_calls_query = Query(GO_LANG, """
+        (call_expression function: (identifier) @call.ident) @call.root
+        (call_expression function: (selector_expression operand: (_) @call.operand field: (field_identifier) @call.field)) @call.root
+        (call_expression function: (index_expression operand: (_) @call.operand index: (_) @call.idx)) @call.root
+        """) if GO_LANG else None
 
     def is_supported(self, file_path: Path) -> bool:
         ext = file_path.suffix.lower()
@@ -187,18 +239,24 @@ class TreeSitterParser:
         parser = self._parsers[lang]
         tree = parser.parse(source_bytes)
         root = tree.root_node
-        symbols: List[ParsedSymbol] = []
+
+        line_starts = [0] + [m.end() for m in re.finditer(b"\\n", source_bytes)]
+
+        def byte_to_line(b: int) -> int:
+            return bisect.bisect_right(line_starts, b)
 
         module_name = get_module_name_from_path(file_name)
         imports = self._extract_imports(root, source_bytes, lang)
+        symbols: List[ParsedSymbol] = []
 
         if lang == "python":
-            self._parse_python(root, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name)
+            self._parse_python(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line)
         elif lang in ("typescript", "javascript"):
-            self._parse_ts_js(root, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name)
+            self._parse_ts_js(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line, lang=lang)
         elif lang == "go":
-            self._parse_go(root, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name)
+            self._parse_go(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line)
 
+        del tree
         return symbols
 
     def parse_file(self, file_path: Path, rel_path: Optional[str] = None) -> List[ParsedSymbol]:
@@ -340,6 +398,182 @@ class TreeSitterParser:
 
         return file_imports
 
+    def _extract_py_calls(self, matches, source: bytes, imports: Optional[FileImports], module_name: str, current_class: str) -> List[str]:
+        calls = []
+        seen = set()
+        for pat, cap in matches:
+            call_names = []
+            if "call.ident" in cap:
+                bare = get_node_text(cap["call.ident"][0], source).strip()
+                if bare == "getattr" and "call.root" in cap:
+                    args_node = cap["call.root"][0].child_by_field_name("arguments")
+                    if args_node:
+                        pos_args = [c for c in args_node.children if c.type not in ("(", ")", ",")]
+                        if len(pos_args) >= 2:
+                            obj_text = get_node_text(pos_args[0], source).strip()
+                            attr_node = pos_args[1]
+                            if attr_node.type == "string":
+                                attr_name = get_node_text(attr_node, source).strip().strip("'\"")
+                                call_names.append(attr_name)
+                                call_names.append(f"dynamic:getattr({obj_text},{attr_name})")
+                                if obj_text in ("self", "cls") and current_class:
+                                    call_names.append(f"{current_class}.{attr_name}")
+                                    if module_name:
+                                        call_names.append(f"{module_name}.{current_class}.{attr_name}")
+                                elif imports and obj_text in imports.instances:
+                                    inst_cls = imports.instances[obj_text]
+                                    if inst_cls in imports.symbols:
+                                        call_names.append(f"{imports.symbols[inst_cls]}.{attr_name}")
+                                    else:
+                                        call_names.append(f"{inst_cls}.{attr_name}")
+                                else:
+                                    call_names.append(f"{obj_text}.{attr_name}")
+                            else:
+                                dyn_name = get_node_text(attr_node, source).strip()
+                                call_names.append(f"<dynamic:{dyn_name}>")
+                                call_names.append(f"dynamic:getattr({obj_text},{dyn_name})")
+                else:
+                    call_names.append(bare)
+                    if imports and bare in imports.symbols:
+                        call_names.append(imports.symbols[bare])
+                    elif module_name:
+                        call_names.append(f"{module_name}.{bare}")
+            elif "call.attr" in cap:
+                attr_name = get_node_text(cap["call.attr"][0], source).strip()
+                call_names.append(attr_name)
+                if "call.obj" in cap:
+                    obj_name = get_node_text(cap["call.obj"][0], source).strip()
+                    if obj_name in ("self", "cls"):
+                        if current_class:
+                            call_names.append(f"{current_class}.{attr_name}")
+                            if module_name:
+                                call_names.append(f"{module_name}.{current_class}.{attr_name}")
+                    elif imports and obj_name in imports.instances:
+                        inst_cls = imports.instances[obj_name]
+                        if inst_cls in imports.symbols:
+                            call_names.append(f"{imports.symbols[inst_cls]}.{attr_name}")
+                        elif module_name:
+                            call_names.append(f"{module_name}.{inst_cls}.{attr_name}")
+                        else:
+                            call_names.append(f"{inst_cls}.{attr_name}")
+                    elif imports and obj_name in imports.modules:
+                        mod = imports.modules[obj_name]
+                        call_names.append(f"{mod}.{attr_name}")
+                    elif imports and obj_name in imports.symbols:
+                        sym = imports.symbols[obj_name]
+                        call_names.append(f"{sym}.{attr_name}")
+                    else:
+                        call_names.append(f"{obj_name}.{attr_name}")
+            elif "call.sub_val" in cap and "call.sub_key" in cap:
+                val_text = get_node_text(cap["call.sub_val"][0], source).strip()
+                sub_node = cap["call.sub_key"][0]
+                if sub_node.type == "string":
+                    key_name = get_node_text(sub_node, source).strip().strip("'\"")
+                    call_names.append(key_name)
+                    call_names.append(f"{val_text}.{key_name}")
+                    call_names.append(f"dynamic:subscript({val_text},{key_name})")
+                else:
+                    dyn_key = get_node_text(sub_node, source).strip()
+                    call_names.append(f"<dynamic:{dyn_key}>")
+                    call_names.append(f"dynamic:subscript({val_text},{dyn_key})")
+
+            for name in call_names:
+                if name and name not in PYTHON_BUILTINS and name not in seen:
+                    seen.add(name)
+                    calls.append(name)
+        return calls
+
+    def _extract_ts_calls(self, matches, source: bytes, imports: Optional[FileImports], module_name: str, current_class: str) -> List[str]:
+        calls = []
+        seen = set()
+        for pat, cap in matches:
+            call_names = []
+            if "call.ident" in cap:
+                bare = get_node_text(cap["call.ident"][0], source).strip()
+                call_names.append(bare)
+                if imports and bare in imports.symbols:
+                    call_names.append(imports.symbols[bare])
+                elif module_name:
+                    call_names.append(f"{module_name}.{bare}")
+            elif "call.prop" in cap and "call.obj" in cap:
+                obj_text = get_node_text(cap["call.obj"][0], source).strip()
+                prop_text = get_node_text(cap["call.prop"][0], source).strip()
+                if obj_text != "console":
+                    call_names.append(prop_text)
+                    if obj_text == "this":
+                        if current_class:
+                            call_names.append(f"{current_class}.{prop_text}")
+                            if module_name:
+                                call_names.append(f"{module_name}.{current_class}.{prop_text}")
+                    elif imports and obj_text in imports.instances:
+                        inst_cls = imports.instances[obj_text]
+                        if inst_cls in imports.symbols:
+                            call_names.append(f"{imports.symbols[inst_cls]}.{prop_text}")
+                        else:
+                            call_names.append(f"{inst_cls}.{prop_text}")
+                    elif imports and obj_text in imports.modules:
+                        mod = imports.modules[obj_text]
+                        call_names.append(f"{mod}.{prop_text}")
+                    else:
+                        call_names.append(f"{obj_text}.{prop_text}")
+            elif "call.idx" in cap and "call.obj" in cap:
+                obj_text = get_node_text(cap["call.obj"][0], source).strip()
+                idx_node = cap["call.idx"][0]
+                if idx_node.type == "string":
+                    prop_text = get_node_text(idx_node, source).strip().strip("'\"`")
+                    call_names.append(prop_text)
+                    call_names.append(f"dynamic:subscript({obj_text},{prop_text})")
+                    if obj_text == "this" and current_class:
+                        call_names.append(f"{current_class}.{prop_text}")
+                        if module_name:
+                            call_names.append(f"{module_name}.{current_class}.{prop_text}")
+                    elif imports and obj_text in imports.instances:
+                        inst_cls = imports.instances[obj_text]
+                        if inst_cls in imports.symbols:
+                            call_names.append(f"{imports.symbols[inst_cls]}.{prop_text}")
+                        else:
+                            call_names.append(f"{inst_cls}.{prop_text}")
+                    else:
+                        call_names.append(f"{obj_text}.{prop_text}")
+                else:
+                    dyn_var = get_node_text(idx_node, source).strip()
+                    call_names.append(f"<dynamic:{dyn_var}>")
+                    call_names.append(f"dynamic:subscript({obj_text},{dyn_var})")
+
+            for name in call_names:
+                if name and name not in JS_BUILTINS and name not in seen:
+                    seen.add(name)
+                    calls.append(name)
+        return calls
+
+    def _extract_go_calls(self, matches, source: bytes, imports: Optional[FileImports], module_name: str) -> List[str]:
+        calls = []
+        seen = set()
+        for pat, cap in matches:
+            call_names = []
+            if "call.ident" in cap:
+                bare = get_node_text(cap["call.ident"][0], source).strip()
+                call_names.append(bare)
+                if module_name:
+                    call_names.append(f"{module_name}.{bare}")
+            elif "call.field" in cap and "call.operand" in cap:
+                field_name = get_node_text(cap["call.field"][0], source).strip()
+                operand_name = get_node_text(cap["call.operand"][0], source).strip()
+                call_names.append(field_name)
+                call_names.append(f"{operand_name}.{field_name}")
+            elif "call.idx" in cap and "call.operand" in cap:
+                op_name = get_node_text(cap["call.operand"][0], source).strip()
+                idx_name = get_node_text(cap["call.idx"][0], source).strip().strip("`\"")
+                call_names.append(idx_name)
+                call_names.append(f"{op_name}.{idx_name}")
+                call_names.append(f"dynamic:index({op_name},{idx_name})")
+
+            for name in call_names:
+                if name and name not in GO_BUILTINS and name not in seen:
+                    seen.add(name)
+                    calls.append(name)
+        return calls
+
     def _extract_calls(
         self,
         node: Node,
@@ -349,262 +583,73 @@ class TreeSitterParser:
         current_module: str = "",
         current_class: str = "",
     ) -> List[str]:
-        """提取 AST 节点内部调用的所有函数或方法名，并结合符号表生成限定目标"""
-        calls: List[str] = []
-        seen = set()
-
-        def walk(curr: Node):
-            # 避开嵌套的类定义，避免干扰
-            if curr != node and curr.type in ("class_definition", "class_declaration"):
-                return
-
-            call_names = []
-            if lang == "python" and curr.type == "call":
-                fn_node = curr.child_by_field_name("function")
-                if fn_node:
-                    if fn_node.type == "identifier":
-                        bare = get_node_text(fn_node, source).strip()
-                        if bare == "getattr":
-                            args_node = curr.child_by_field_name("arguments")
-                            if args_node:
-                                pos_args = [c for c in args_node.children if c.type not in ("(", ")", ",")]
-                                if len(pos_args) >= 2:
-                                    obj_text = get_node_text(pos_args[0], source).strip()
-                                    attr_node = pos_args[1]
-                                    if attr_node.type == "string":
-                                        attr_name = get_node_text(attr_node, source).strip().strip("'\"")
-                                        call_names.append(attr_name)
-                                        call_names.append(f"dynamic:getattr({obj_text},{attr_name})")
-                                        if obj_text in ("self", "cls") and current_class:
-                                            call_names.append(f"{current_class}.{attr_name}")
-                                            if current_module:
-                                                call_names.append(f"{current_module}.{current_class}.{attr_name}")
-                                        elif imports and obj_text in imports.instances:
-                                            inst_cls = imports.instances[obj_text]
-                                            if inst_cls in imports.symbols:
-                                                call_names.append(f"{imports.symbols[inst_cls]}.{attr_name}")
-                                            else:
-                                                call_names.append(f"{inst_cls}.{attr_name}")
-                                        else:
-                                            call_names.append(f"{obj_text}.{attr_name}")
-                                    else:
-                                        dyn_name = get_node_text(attr_node, source).strip()
-                                        call_names.append(f"<dynamic:{dyn_name}>")
-                                        call_names.append(f"dynamic:getattr({obj_text},{dyn_name})")
-                        else:
-                            call_names.append(bare)
-                            if imports and bare in imports.symbols:
-                                call_names.append(imports.symbols[bare])
-                            elif current_module:
-                                call_names.append(f"{current_module}.{bare}")
-                    elif fn_node.type == "attribute":
-                        attr_node = fn_node.child_by_field_name("attribute")
-                        obj_node = fn_node.child_by_field_name("object")
-                        if attr_node:
-                            attr_name = get_node_text(attr_node, source).strip()
-                            call_names.append(attr_name)
-                            if obj_node:
-                                obj_name = get_node_text(obj_node, source).strip()
-                                if obj_name in ("self", "cls"):
-                                    if current_class:
-                                        call_names.append(f"{current_class}.{attr_name}")
-                                        if current_module:
-                                            call_names.append(f"{current_module}.{current_class}.{attr_name}")
-                                elif imports and obj_name in imports.instances:
-                                    inst_cls = imports.instances[obj_name]
-                                    if inst_cls in imports.symbols:
-                                        call_names.append(f"{imports.symbols[inst_cls]}.{attr_name}")
-                                    elif current_module:
-                                        call_names.append(f"{current_module}.{inst_cls}.{attr_name}")
-                                    else:
-                                        call_names.append(f"{inst_cls}.{attr_name}")
-                                elif imports and obj_name in imports.modules:
-                                    mod = imports.modules[obj_name]
-                                    call_names.append(f"{mod}.{attr_name}")
-                                elif imports and obj_name in imports.symbols:
-                                    sym = imports.symbols[obj_name]
-                                    call_names.append(f"{sym}.{attr_name}")
-                                else:
-                                    call_names.append(f"{obj_name}.{attr_name}")
-                    elif fn_node.type == "call":
-                        # 处理 getattr(obj, "method")(args) 链式调用
-                        sub_fn = fn_node.child_by_field_name("function")
-                        if sub_fn and get_node_text(sub_fn, source).strip() == "getattr":
-                            sub_args = fn_node.child_by_field_name("arguments")
-                            if sub_args:
-                                pos_args = [c for c in sub_args.children if c.type not in ("(", ")", ",")]
-                                if len(pos_args) >= 2:
-                                    obj_text = get_node_text(pos_args[0], source).strip()
-                                    attr_node = pos_args[1]
-                                    if attr_node.type == "string":
-                                        attr_name = get_node_text(attr_node, source).strip().strip("'\"")
-                                        call_names.append(attr_name)
-                                        call_names.append(f"dynamic:getattr({obj_text},{attr_name})")
-                                        if obj_text in ("self", "cls") and current_class:
-                                            call_names.append(f"{current_class}.{attr_name}")
-                                            if current_module:
-                                                call_names.append(f"{current_module}.{current_class}.{attr_name}")
-                                        elif imports and obj_text in imports.instances:
-                                            inst_cls = imports.instances[obj_text]
-                                            if inst_cls in imports.symbols:
-                                                call_names.append(f"{imports.symbols[inst_cls]}.{attr_name}")
-                                            else:
-                                                call_names.append(f"{inst_cls}.{attr_name}")
-                                        else:
-                                            call_names.append(f"{obj_text}.{attr_name}")
-                                    else:
-                                        dyn_name = get_node_text(attr_node, source).strip()
-                                        call_names.append(f"<dynamic:{dyn_name}>")
-                                        call_names.append(f"dynamic:getattr({obj_text},{dyn_name})")
-                    elif fn_node.type == "subscript":
-                        # 处理 Python 字典分发/动态下标调用: dispatch["login"](args) 或 handlers[event](args)
-                        val_node = fn_node.child_by_field_name("value")
-                        sub_node = fn_node.child_by_field_name("subscript")
-                        if val_node and sub_node:
-                            val_text = get_node_text(val_node, source).strip()
-                            if sub_node.type == "string":
-                                key_name = get_node_text(sub_node, source).strip().strip("'\"")
-                                call_names.append(key_name)
-                                call_names.append(f"{val_text}.{key_name}")
-                                call_names.append(f"dynamic:subscript({val_text},{key_name})")
-                            else:
-                                dyn_key = get_node_text(sub_node, source).strip()
-                                call_names.append(f"<dynamic:{dyn_key}>")
-                                call_names.append(f"dynamic:subscript({val_text},{dyn_key})")
-            elif lang in ("typescript", "javascript") and curr.type == "call_expression":
-                fn_node = curr.child_by_field_name("function")
-                if fn_node:
-                    if fn_node.type == "identifier":
-                        bare = get_node_text(fn_node, source).strip()
-                        call_names.append(bare)
-                        if imports and bare in imports.symbols:
-                            call_names.append(imports.symbols[bare])
-                        elif current_module:
-                            call_names.append(f"{current_module}.{bare}")
-                    elif fn_node.type == "member_expression":
-                        # 过滤 console.log / console.error 等调用
-                        obj_node = fn_node.child_by_field_name("object")
-                        prop_node = fn_node.child_by_field_name("property")
-                        if obj_node and prop_node:
-                            obj_text = get_node_text(obj_node, source).strip()
-                            prop_text = get_node_text(prop_node, source).strip()
-                            if obj_text != "console":
-                                call_names.append(prop_text)
-                                if obj_text == "this":
-                                    if current_class:
-                                        call_names.append(f"{current_class}.{prop_text}")
-                                        if current_module:
-                                            call_names.append(f"{current_module}.{current_class}.{prop_text}")
-                                elif imports and obj_text in imports.instances:
-                                    inst_cls = imports.instances[obj_text]
-                                    if inst_cls in imports.symbols:
-                                        call_names.append(f"{imports.symbols[inst_cls]}.{prop_text}")
-                                    else:
-                                        call_names.append(f"{inst_cls}.{prop_text}")
-                                elif imports and obj_text in imports.modules:
-                                    mod = imports.modules[obj_text]
-                                    call_names.append(f"{mod}.{prop_text}")
-                                else:
-                                    call_names.append(f"{obj_text}.{prop_text}")
-                    elif fn_node.type == "subscript_expression":
-                        # 处理 TS/JS 动态下标调用: obj["method"](args) 或 obj[dynamicKey](args)
-                        obj_node = fn_node.child_by_field_name("object")
-                        idx_node = fn_node.child_by_field_name("index")
-                        if obj_node and idx_node:
-                            obj_text = get_node_text(obj_node, source).strip()
-                            if idx_node.type == "string":
-                                prop_text = get_node_text(idx_node, source).strip().strip("'\"`")
-                                call_names.append(prop_text)
-                                call_names.append(f"dynamic:subscript({obj_text},{prop_text})")
-                                if obj_text == "this" and current_class:
-                                    call_names.append(f"{current_class}.{prop_text}")
-                                    if current_module:
-                                        call_names.append(f"{current_module}.{current_class}.{prop_text}")
-                                elif imports and obj_text in imports.instances:
-                                    inst_cls = imports.instances[obj_text]
-                                    if inst_cls in imports.symbols:
-                                        call_names.append(f"{imports.symbols[inst_cls]}.{prop_text}")
-                                    else:
-                                        call_names.append(f"{inst_cls}.{prop_text}")
-                                else:
-                                    call_names.append(f"{obj_text}.{prop_text}")
-                            else:
-                                dyn_var = get_node_text(idx_node, source).strip()
-                                call_names.append(f"<dynamic:{dyn_var}>")
-                                call_names.append(f"dynamic:subscript({obj_text},{dyn_var})")
-            elif lang == "go" and curr.type == "call_expression":
-                fn_node = curr.child_by_field_name("function")
-                if fn_node:
-                    if fn_node.type == "identifier":
-                        bare = get_node_text(fn_node, source).strip()
-                        call_names.append(bare)
-                        if current_module:
-                            call_names.append(f"{current_module}.{bare}")
-                    elif fn_node.type == "selector_expression":
-                        field_node = fn_node.child_by_field_name("field")
-                        operand_node = fn_node.child_by_field_name("operand")
-                        if field_node:
-                            field_name = get_node_text(field_node, source).strip()
-                            call_names.append(field_name)
-                            if operand_node:
-                                operand_name = get_node_text(operand_node, source).strip()
-                                call_names.append(f"{operand_name}.{field_name}")
-                    elif fn_node.type == "index_expression":
-                        # 处理 Go map 动态分发调用: handlers["key"](args)
-                        operand_node = fn_node.child_by_field_name("operand")
-                        index_node = fn_node.child_by_field_name("index")
-                        if operand_node and index_node:
-                            op_name = get_node_text(operand_node, source).strip()
-                            idx_name = get_node_text(index_node, source).strip().strip("`\"")
-                            call_names.append(idx_name)
-                            call_names.append(f"{op_name}.{idx_name}")
-                            call_names.append(f"dynamic:index({op_name},{idx_name})")
-
-            lang_builtins = LANG_BUILTINS.get(lang, BUILTIN_CALLS)
-            for name in call_names:
-                if name and name not in lang_builtins and name not in seen:
-                    seen.add(name)
-                    calls.append(name)
-
-            for child in curr.children:
-                walk(child)
-
-        walk(node)
+        """向后兼容的调用提取接口 (内部转调高效 Query Cursor)"""
+        query_map = {
+            "python": self._py_calls_query,
+            "typescript": self._ts_calls_query,
+            "javascript": self._ts_calls_query,
+            "go": self._go_calls_query,
+        }
+        query = query_map.get(lang)
+        if not query:
+            return []
+        cursor = QueryCursor(query)
+        cursor.set_byte_range(int(node.start_byte), int(node.end_byte))
+        matches = cursor.matches(node)
+        if lang == "python":
+            calls = self._extract_py_calls(matches, source, imports, current_module, current_class)
+        elif lang in ("typescript", "javascript"):
+            calls = self._extract_ts_calls(matches, source, imports, current_module, current_class)
+        elif lang == "go":
+            calls = self._extract_go_calls(matches, source, imports, current_module)
+        else:
+            calls = []
+        del cursor
         return calls
 
     def _parse_python(
         self,
-        root: Node,
+        tree: Any,
         source: bytes,
         symbols: List[ParsedSymbol],
         imports: Optional[FileImports] = None,
         module_name: str = "",
         file_path: str = "",
+        byte_to_line=None,
     ):
-        def extract_item(node: Node):
-            target = node
-            if node.type == "decorated_definition":
-                for c in node.children:
-                    if c.type in ("class_definition", "function_definition"):
-                        target = c
-                        break
+        if byte_to_line is None:
+            line_starts = [0] + [m.end() for m in re.finditer(b"\n", source)]
+            byte_to_line = lambda b: bisect.bisect_right(line_starts, b)
 
-            if target.type == "class_definition":
-                cls_name = ""
-                for n in target.children:
-                    if n.type == "identifier":
-                        cls_name = get_node_text(n, source)
-                        break
+        root = tree.root_node if hasattr(tree, "root_node") else tree
+        classes = []
 
-                doc = self._get_python_docstring(target, source) or get_leading_comment(node, source)
-                cls_qname = f"{module_name}.{cls_name}" if module_name else cls_name
+        # 1. 声明式查询类定义
+        if self._py_class_query:
+            cursor_cls = QueryCursor(self._py_class_query)
+            for pat, cap in cursor_cls.matches(root):
+                def_node = cap["cls.def"][0]
+                outer_node = def_node.parent if def_node.parent and def_node.parent.type == "decorated_definition" else def_node
+                name = get_node_text(cap["cls.name"][0], source).strip()
+                s_byte = int(outer_node.start_byte)
+                e_byte = int(outer_node.end_byte)
+                s_line = byte_to_line(s_byte)
+                e_line = byte_to_line(e_byte)
+                code_text = source[s_byte:e_byte].decode("utf-8", errors="replace")
+                doc = get_leading_comment(outer_node, source)
+                cls_qname = f"{module_name}.{name}" if module_name else name
+                classes.append({
+                    "name": name,
+                    "start": s_byte,
+                    "end": e_byte,
+                })
                 symbols.append(
                     ParsedSymbol(
-                        name=cls_name or "[AnonymousClass]",
+                        name=name or "[AnonymousClass]",
                         symbol_type="class",
-                        start_line=node.start_point.row + 1,
-                        end_line=node.end_point.row + 1,
-                        code=get_node_text(node, source),
+                        start_line=s_line,
+                        end_line=e_line,
+                        code=code_text,
                         docstring=doc,
                         route_info="",
                         signature="",
@@ -614,140 +659,107 @@ class TreeSitterParser:
                         qualified_name=cls_qname,
                     )
                 )
+            del cursor_cls
 
-                # 提取方法
-                body = target.child_by_field_name("body")
-                if body:
-                    for item in body.children:
-                        m_target = item
-                        if item.type == "decorated_definition":
-                            for c in item.children:
-                                if c.type == "function_definition":
-                                    m_target = c
-                                    break
-                        if m_target.type == "function_definition":
-                            fn_name = ""
-                            sig = ""
-                            for n in m_target.children:
-                                if n.type == "identifier":
-                                    fn_name = get_node_text(n, source)
-                                elif n.type == "parameters":
-                                    sig = get_node_text(n, source)
+        # 2. 声明式查询函数/方法定义与边区间调用
+        if self._py_fn_query and self._py_calls_query:
+            cursor_fn = QueryCursor(self._py_fn_query)
+            cursor_calls = QueryCursor(self._py_calls_query)
 
-                            fn_doc = self._get_python_docstring(m_target, source) or get_leading_comment(item, source)
-                            route = self._extract_route_from_text(get_node_text(item, source))
-                            m_calls = self._extract_calls(
-                                m_target,
-                                source,
-                                "python",
-                                imports=imports,
-                                current_module=module_name,
-                                current_class=cls_name,
-                            )
-                            method_name = f"{cls_name}.{fn_name}" if cls_name else fn_name
-                            m_qname = f"{module_name}.{method_name}" if module_name else method_name
-                            symbols.append(
-                                ParsedSymbol(
-                                    name=method_name,
-                                    symbol_type="method",
-                                    start_line=item.start_point.row + 1,
-                                    end_line=item.end_point.row + 1,
-                                    code=get_node_text(item, source),
-                                    docstring=fn_doc,
-                                    route_info=route,
-                                    signature=sig,
-                                    calls=m_calls,
-                                    file_path=file_path,
-                                    module_name=module_name,
-                                    qualified_name=m_qname,
-                                )
-                            )
+            for pat, cap in cursor_fn.matches(root):
+                def_node = cap["fn.def"][0]
+                outer_node = def_node.parent if def_node.parent and def_node.parent.type == "decorated_definition" else def_node
+                fn_name = get_node_text(cap["fn.name"][0], source).strip()
+                s_byte = int(outer_node.start_byte)
+                e_byte = int(outer_node.end_byte)
+                s_line = byte_to_line(s_byte)
+                e_line = byte_to_line(e_byte)
+                code_text = source[s_byte:e_byte].decode("utf-8", errors="replace")
+                doc = get_leading_comment(outer_node, source)
+                route = self._extract_route_from_text(code_text)
 
-            elif target.type == "function_definition":
-                fn_name = ""
-                sig = ""
-                for n in target.children:
-                    if n.type == "identifier":
-                        fn_name = get_node_text(n, source)
-                    elif n.type == "parameters":
-                        sig = get_node_text(n, source)
+                # 所属类判定 (区间包含)
+                parent_cls = None
+                enclosing = [c for c in classes if c["start"] <= s_byte and e_byte <= c["end"]]
+                if enclosing:
+                    enclosing.sort(key=lambda c: c["end"] - c["start"])
+                    parent_cls = enclosing[0]["name"]
 
-                doc = self._get_python_docstring(target, source) or get_leading_comment(node, source)
-                route = self._extract_route_from_text(get_node_text(node, source))
-                fn_calls = self._extract_calls(
-                    target,
-                    source,
-                    "python",
-                    imports=imports,
-                    current_module=module_name,
-                    current_class="",
-                )
-                fn_qname = f"{module_name}.{fn_name}" if module_name else fn_name
+                # 签名提取
+                params_node = def_node.child_by_field_name("parameters")
+                sig = get_node_text(params_node, source) if params_node else "()"
+
+                # 边区间查询调用
+                cursor_calls.set_byte_range(int(def_node.start_byte), int(def_node.end_byte))
+                call_matches = cursor_calls.matches(root)
+                fn_calls = self._extract_py_calls(call_matches, source, imports, module_name, parent_cls or "")
+
+                full_name = f"{parent_cls}.{fn_name}" if parent_cls else fn_name
+                qname = f"{module_name}.{full_name}" if module_name else full_name
                 symbols.append(
                     ParsedSymbol(
-                        name=fn_name,
-                        symbol_type="function",
-                        start_line=node.start_point.row + 1,
-                        end_line=node.end_point.row + 1,
-                        code=get_node_text(node, source),
+                        name=full_name,
+                        symbol_type="method" if parent_cls else "function",
+                        start_line=s_line,
+                        end_line=e_line,
+                        code=code_text,
                         docstring=doc,
                         route_info=route,
                         signature=sig,
                         calls=fn_calls,
                         file_path=file_path,
                         module_name=module_name,
-                        qualified_name=fn_qname,
+                        qualified_name=qname,
                     )
                 )
 
-        for child in root.children:
-            extract_item(child)
-
-    def _get_python_docstring(self, node: Node, source: bytes) -> str:
-        body = node.child_by_field_name("body")
-        if body and body.children:
-            first_stmt = body.children[0]
-            if first_stmt.type == "expression_statement":
-                for sub in first_stmt.children:
-                    if sub.type == "string":
-                        txt = get_node_text(sub, source)
-                        return txt.strip("\"' \n\r")
-        return ""
+            del cursor_fn
+            del cursor_calls
 
     def _parse_ts_js(
         self,
-        root: Node,
+        tree: Any,
         source: bytes,
         symbols: List[ParsedSymbol],
         imports: Optional[FileImports] = None,
         module_name: str = "",
         file_path: str = "",
+        byte_to_line=None,
+        lang: str = "typescript",
     ):
-        def handle_node(node: Node):
-            # 处理 export 包装
-            target = node
-            if node.type == "export_statement":
-                for c in node.children:
-                    if c.type in ("class_declaration", "function_declaration", "lexical_declaration"):
-                        target = c
-                        break
+        if byte_to_line is None:
+            line_starts = [0] + [m.end() for m in re.finditer(b"\n", source)]
+            byte_to_line = lambda b: bisect.bisect_right(line_starts, b)
 
-            if target.type == "class_declaration":
-                cls_name = ""
-                for n in target.children:
-                    if n.type in ("identifier", "type_identifier"):
-                        cls_name = get_node_text(n, source)
-                        break
+        root = tree.root_node if hasattr(tree, "root_node") else tree
+        classes = []
 
-                doc = get_leading_comment(node, source)
-                cls_qname = f"{module_name}.{cls_name}" if module_name else cls_name
+        is_js = (lang == "javascript")
+        class_query = self._js_class_query if is_js else self._ts_class_query
+        defs_query = self._js_defs_query if is_js else self._ts_defs_query
+        calls_query = self._js_calls_query if is_js else self._ts_calls_query
+
+        if class_query:
+            cursor_cls = QueryCursor(class_query)
+            for pat, cap in cursor_cls.matches(root):
+                def_node = cap["cls.def"][0]
+                outer_node = def_node.parent if def_node.parent and def_node.parent.type == "export_statement" else def_node
+                name = get_node_text(cap["cls.name"][0], source).strip()
+                s_byte = int(outer_node.start_byte)
+                e_byte = int(outer_node.end_byte)
+                s_line = byte_to_line(s_byte)
+                e_line = byte_to_line(e_byte)
+                code_text = source[s_byte:e_byte].decode("utf-8", errors="replace")
+                doc = get_leading_comment(outer_node, source)
+                cls_qname = f"{module_name}.{name}" if module_name else name
+                classes.append({"name": name, "start": s_byte, "end": e_byte})
                 symbols.append(
                     ParsedSymbol(
-                        name=cls_name or "[AnonymousClass]",
+                        name=name or "[AnonymousClass]",
                         symbol_type="class",
-                        start_line=node.start_point.row + 1,
-                        end_line=node.end_point.row + 1,
-                        code=get_node_text(node, source),
+                        start_line=s_line,
+                        end_line=e_line,
+                        code=code_text,
                         docstring=doc,
                         route_info="",
                         signature="",
@@ -757,241 +769,213 @@ class TreeSitterParser:
                         qualified_name=cls_qname,
                     )
                 )
+            del cursor_cls
 
-                # 提取方法
-                body = target.child_by_field_name("body")
-                if body:
-                    for item in body.children:
-                        if item.type in ("method_definition", "public_field_definition"):
-                            m_name = ""
-                            sig = ""
-                            for n in item.children:
-                                if n.type == "property_identifier":
-                                    m_name = get_node_text(n, source)
-                                elif n.type == "formal_parameters":
-                                    sig = get_node_text(n, source)
-                            if m_name:
-                                m_doc = get_leading_comment(item, source)
-                                m_route = self._extract_route_from_text(get_node_text(item, source))
-                                m_calls = self._extract_calls(
-                                    item,
-                                    source,
-                                    "typescript",
-                                    imports=imports,
-                                    current_module=module_name,
-                                    current_class=cls_name,
-                                )
-                                full_method = f"{cls_name}.{m_name}" if cls_name else m_name
-                                m_qname = f"{module_name}.{full_method}" if module_name else full_method
-                                symbols.append(
-                                    ParsedSymbol(
-                                        name=full_method,
-                                        symbol_type="method",
-                                        start_line=item.start_point.row + 1,
-                                        end_line=item.end_point.row + 1,
-                                        code=get_node_text(item, source),
-                                        docstring=m_doc,
-                                        route_info=m_route,
-                                        signature=sig,
-                                        calls=m_calls,
-                                        file_path=file_path,
-                                        module_name=module_name,
-                                        qualified_name=m_qname,
-                                    )
-                                )
+        if defs_query and calls_query:
+            cursor_defs = QueryCursor(defs_query)
+            cursor_calls = QueryCursor(calls_query)
 
-            elif target.type == "function_declaration":
-                fn_name = ""
-                sig = ""
-                for n in target.children:
-                    if n.type == "identifier":
-                        fn_name = get_node_text(n, source)
-                    elif n.type == "formal_parameters":
-                        sig = get_node_text(n, source)
-                if fn_name:
-                    doc = get_leading_comment(node, source)
-                    route = self._extract_route_from_text(get_node_text(node, source))
-                    fn_calls = self._extract_calls(
-                        target,
-                        source,
-                        "typescript",
-                        imports=imports,
-                        current_module=module_name,
-                        current_class="",
+            for pat, cap in cursor_defs.matches(root):
+                item_node = None
+                name = ""
+                sym_type = "function"
+                sig = "()"
+
+                if "fn.def" in cap and "fn.name" in cap:
+                    item_node = cap["fn.def"][0]
+                    name = get_node_text(cap["fn.name"][0], source).strip()
+                    params = item_node.child_by_field_name("parameters") or item_node.child_by_field_name("formal_parameters")
+                    sig = get_node_text(params, source) if params else "()"
+                elif "method.def" in cap and "method.name" in cap:
+                    item_node = cap["method.def"][0]
+                    name = get_node_text(cap["method.name"][0], source).strip()
+                    sym_type = "method"
+                    params = item_node.child_by_field_name("parameters") or item_node.child_by_field_name("formal_parameters")
+                    sig = get_node_text(params, source) if params else "()"
+                elif "field.def" in cap and "field.name" in cap:
+                    item_node = cap["field.def"][0]
+                    name = get_node_text(cap["field.name"][0], source).strip()
+                    sym_type = "method"
+                    sig = ""
+                elif "var.def" in cap and "var.name" in cap:
+                    item_node = cap["var.def"][0]
+                    name = get_node_text(cap["var.name"][0], source).strip()
+                    sym_type = "function"
+                    sig = "()"
+
+                if not item_node or not name:
+                    continue
+
+                outer_node = item_node.parent if item_node.parent and item_node.parent.type == "export_statement" else item_node
+                s_byte = int(outer_node.start_byte)
+                e_byte = int(outer_node.end_byte)
+                s_line = byte_to_line(s_byte)
+                e_line = byte_to_line(e_byte)
+                code_text = source[s_byte:e_byte].decode("utf-8", errors="replace")
+
+                parent_cls = None
+                enclosing = [c for c in classes if c["start"] <= s_byte and e_byte <= c["end"]]
+                if enclosing:
+                    enclosing.sort(key=lambda c: c["end"] - c["start"])
+                    parent_cls = enclosing[0]["name"]
+                    sym_type = "method"
+
+                doc = get_leading_comment(outer_node, source)
+                route = self._extract_route_from_text(code_text)
+
+                cursor_calls.set_byte_range(int(item_node.start_byte), int(item_node.end_byte))
+                call_matches = cursor_calls.matches(root)
+                fn_calls = self._extract_ts_calls(call_matches, source, imports, module_name, parent_cls or "")
+
+                full_name = f"{parent_cls}.{name}" if parent_cls else name
+                qname = f"{module_name}.{full_name}" if module_name else full_name
+                symbols.append(
+                    ParsedSymbol(
+                        name=full_name,
+                        symbol_type=sym_type,
+                        start_line=s_line,
+                        end_line=e_line,
+                        code=code_text,
+                        docstring=doc,
+                        route_info=route,
+                        signature=sig,
+                        calls=fn_calls,
+                        file_path=file_path,
+                        module_name=module_name,
+                        qualified_name=qname,
                     )
-                    fn_qname = f"{module_name}.{fn_name}" if module_name else fn_name
+                )
+
+            del cursor_defs
+            del cursor_calls
+
+    def _parse_go(
+        self,
+        tree: Any,
+        source: bytes,
+        symbols: List[ParsedSymbol],
+        imports: Optional[FileImports] = None,
+        module_name: str = "",
+        file_path: str = "",
+        byte_to_line=None,
+    ):
+        if byte_to_line is None:
+            line_starts = [0] + [m.end() for m in re.finditer(b"\n", source)]
+            byte_to_line = lambda b: bisect.bisect_right(line_starts, b)
+
+        root = tree.root_node if hasattr(tree, "root_node") else tree
+
+        if self._go_types_query:
+            cursor_types = QueryCursor(self._go_types_query)
+            for pat, cap in cursor_types.matches(root):
+                node = cap.get("struct.def", cap.get("iface.def"))[0]
+                outer_node = node.parent if node.parent and node.parent.type == "type_declaration" else node
+                name = get_node_text(cap["type.name"][0], source).strip()
+                s_byte = int(outer_node.start_byte)
+                e_byte = int(outer_node.end_byte)
+                s_line = byte_to_line(s_byte)
+                e_line = byte_to_line(e_byte)
+                code_text = source[s_byte:e_byte].decode("utf-8", errors="replace")
+                doc = get_leading_comment(outer_node, source)
+                qname = f"{module_name}.{name}" if module_name else name
+                symbols.append(
+                    ParsedSymbol(
+                        name=name or "[Struct]",
+                        symbol_type="struct",
+                        start_line=s_line,
+                        end_line=e_line,
+                        code=code_text,
+                        docstring=doc,
+                        route_info="",
+                        signature="",
+                        calls=[],
+                        file_path=file_path,
+                        module_name=module_name,
+                        qualified_name=qname,
+                    )
+                )
+            del cursor_types
+
+        if self._go_defs_query and self._go_calls_query:
+            cursor_defs = QueryCursor(self._go_defs_query)
+            cursor_calls = QueryCursor(self._go_calls_query)
+
+            for pat, cap in cursor_defs.matches(root):
+                if "method.def" in cap:
+                    node = cap["method.def"][0]
+                    m_name = get_node_text(cap["method.name"][0], source).strip()
+                    recv_text = get_node_text(cap["method.recv"][0], source).strip("() ")
+                    recv_clean = re.sub(r"[\*\(\)\s]", "", recv_text.split()[-1]) if recv_text else ""
+                    full_name = f"{recv_clean}.{m_name}" if recv_clean else m_name
+                    s_byte = int(node.start_byte)
+                    e_byte = int(node.end_byte)
+                    s_line = byte_to_line(s_byte)
+                    e_line = byte_to_line(e_byte)
+                    code_text = source[s_byte:e_byte].decode("utf-8", errors="replace")
+                    doc = get_leading_comment(node, source)
+                    route = self._extract_route_from_text(code_text)
+
+                    params_node = node.child_by_field_name("parameters")
+                    sig = get_node_text(params_node, source) if params_node else "()"
+
+                    cursor_calls.set_byte_range(s_byte, e_byte)
+                    call_matches = cursor_calls.matches(root)
+                    fn_calls = self._extract_go_calls(call_matches, source, imports, module_name)
+
+                    qname = f"{module_name}.{full_name}" if module_name else full_name
                     symbols.append(
                         ParsedSymbol(
-                            name=fn_name,
-                            symbol_type="function",
-                            start_line=node.start_point.row + 1,
-                            end_line=node.end_point.row + 1,
-                            code=get_node_text(node, source),
+                            name=full_name,
+                            symbol_type="method",
+                            start_line=s_line,
+                            end_line=e_line,
+                            code=code_text,
                             docstring=doc,
                             route_info=route,
                             signature=sig,
                             calls=fn_calls,
                             file_path=file_path,
                             module_name=module_name,
-                            qualified_name=fn_qname,
+                            qualified_name=qname,
+                        )
+                    )
+                elif "fn.def" in cap:
+                    node = cap["fn.def"][0]
+                    fn_name = get_node_text(cap["fn.name"][0], source).strip()
+                    s_byte = int(node.start_byte)
+                    e_byte = int(node.end_byte)
+                    s_line = byte_to_line(s_byte)
+                    e_line = byte_to_line(e_byte)
+                    code_text = source[s_byte:e_byte].decode("utf-8", errors="replace")
+                    doc = get_leading_comment(node, source)
+                    route = self._extract_route_from_text(code_text)
+                    params_node = node.child_by_field_name("parameters") or node.child_by_field_name("parameter_list")
+                    sig = get_node_text(params_node, source) if params_node else "()"
+
+                    cursor_calls.set_byte_range(s_byte, e_byte)
+                    call_matches = cursor_calls.matches(root)
+                    fn_calls = self._extract_go_calls(call_matches, source, imports, module_name)
+
+                    qname = f"{module_name}.{fn_name}" if module_name else fn_name
+                    symbols.append(
+                        ParsedSymbol(
+                            name=fn_name,
+                            symbol_type="function",
+                            start_line=s_line,
+                            end_line=e_line,
+                            code=code_text,
+                            docstring=doc,
+                            route_info=route,
+                            signature=sig,
+                            calls=fn_calls,
+                            file_path=file_path,
+                            module_name=module_name,
+                            qualified_name=qname,
                         )
                     )
 
-            elif target.type == "lexical_declaration":
-                # const login = async (req, res) => { ... }
-                code_text = get_node_text(target, source)
-                if "=>" in code_text or "function" in code_text:
-                    for decl in target.children:
-                        if decl.type == "variable_declarator":
-                            v_name = ""
-                            for n in decl.children:
-                                if n.type == "identifier":
-                                    v_name = get_node_text(n, source)
-                                    break
-                            if v_name:
-                                doc = get_leading_comment(node, source)
-                                route = self._extract_route_from_text(code_text)
-                                fn_calls = self._extract_calls(
-                                    target,
-                                    source,
-                                    "typescript",
-                                    imports=imports,
-                                    current_module=module_name,
-                                    current_class="",
-                                )
-                                v_qname = f"{module_name}.{v_name}" if module_name else v_name
-                                symbols.append(
-                                    ParsedSymbol(
-                                        name=v_name,
-                                        symbol_type="function",
-                                        start_line=node.start_point.row + 1,
-                                        end_line=node.end_point.row + 1,
-                                        code=get_node_text(node, source),
-                                        docstring=doc,
-                                        route_info=route,
-                                        signature="()",
-                                        calls=fn_calls,
-                                        file_path=file_path,
-                                        module_name=module_name,
-                                        qualified_name=v_qname,
-                                    )
-                                )
-
-        for child in root.children:
-            handle_node(child)
-
-    def _parse_go(
-        self,
-        root: Node,
-        source: bytes,
-        symbols: List[ParsedSymbol],
-        imports: Optional[FileImports] = None,
-        module_name: str = "",
-        file_path: str = "",
-    ):
-        for child in root.children:
-            if child.type == "type_declaration":
-                for spec in child.children:
-                    if spec.type == "type_spec":
-                        type_name = ""
-                        for n in spec.children:
-                            if n.type == "type_identifier":
-                                type_name = get_node_text(n, source)
-                                break
-                        doc = get_leading_comment(child, source)
-                        struct_qname = f"{module_name}.{type_name}" if module_name else type_name
-                        symbols.append(
-                            ParsedSymbol(
-                                name=type_name or "[Struct]",
-                                symbol_type="struct",
-                                start_line=child.start_point.row + 1,
-                                end_line=child.end_point.row + 1,
-                                code=get_node_text(child, source),
-                                docstring=doc,
-                                route_info="",
-                                signature="",
-                                calls=[],
-                                file_path=file_path,
-                                module_name=module_name,
-                                qualified_name=struct_qname,
-                            )
-                        )
-
-            elif child.type == "function_declaration":
-                fn_name = ""
-                sig = ""
-                for n in child.children:
-                    if n.type == "identifier":
-                        fn_name = get_node_text(n, source)
-                    elif n.type == "parameter_list":
-                        sig = get_node_text(n, source)
-
-                doc = get_leading_comment(child, source)
-                route = self._extract_route_from_text(get_node_text(child, source))
-                fn_calls = self._extract_calls(
-                    child,
-                    source,
-                    "go",
-                    imports=imports,
-                    current_module=module_name,
-                    current_class="",
-                )
-                fn_qname = f"{module_name}.{fn_name}" if module_name else fn_name
-                symbols.append(
-                    ParsedSymbol(
-                        name=fn_name,
-                        symbol_type="function",
-                        start_line=child.start_point.row + 1,
-                        end_line=child.end_point.row + 1,
-                        code=get_node_text(child, source),
-                        docstring=doc,
-                        route_info=route,
-                        signature=sig,
-                        calls=fn_calls,
-                        file_path=file_path,
-                        module_name=module_name,
-                        qualified_name=fn_qname,
-                    )
-                )
-
-            elif child.type == "method_declaration":
-                recv_node = child.child_by_field_name("receiver")
-                name_node = child.child_by_field_name("name")
-                params_node = child.child_by_field_name("parameters")
-
-                recv_raw = get_node_text(recv_node, source) if recv_node else ""
-                fn_name = get_node_text(name_node, source) if name_node else ""
-                sig = get_node_text(params_node, source) if params_node else "()"
-
-                recv_clean = re.sub(r"[\*\(\)\s]", "", recv_raw.split()[-1]) if recv_raw else ""
-                full_name = f"{recv_clean}.{fn_name}" if recv_clean else fn_name
-                doc = get_leading_comment(child, source)
-                route = self._extract_route_from_text(get_node_text(child, source))
-                fn_calls = self._extract_calls(
-                    child,
-                    source,
-                    "go",
-                    imports=imports,
-                    current_module=module_name,
-                    current_class=recv_clean,
-                )
-                method_qname = f"{module_name}.{full_name}" if module_name else full_name
-                symbols.append(
-                    ParsedSymbol(
-                        name=full_name,
-                        symbol_type="method",
-                        start_line=child.start_point.row + 1,
-                        end_line=child.end_point.row + 1,
-                        code=get_node_text(child, source),
-                        docstring=doc,
-                        route_info=route,
-                        signature=sig,
-                        calls=fn_calls,
-                        file_path=file_path,
-                        module_name=module_name,
-                        qualified_name=method_qname,
-                    )
-                )
+            del cursor_defs
+            del cursor_calls
 
     def _extract_route_from_text(self, text: str) -> str:
         """从装饰器、注释或路由代码中提取 API 路由"""

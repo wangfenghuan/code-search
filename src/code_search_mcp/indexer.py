@@ -94,6 +94,68 @@ class UniversalCodeChunker:
         self.repo_root = repo_root
         self.ts_parser = TreeSitterParser()
 
+    def _fallback_text_chunks(self, file_path: Path, rel_path: str, lang: str) -> List[CodeChunk]:
+        """降级纯文本滑动窗口切片：针对超大文件 (>1MB) 或异常文件，确保不崩溃并保留搜索能力"""
+        chunks: List[CodeChunk] = []
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return chunks
+        lines = content.splitlines()
+        if not lines:
+            return chunks
+
+        mod_name = get_module_name_from_path(rel_path)
+        window_size = 100
+        overlap = 25
+        step = max(1, window_size - overlap)
+        part_idx = 1
+
+        for start_idx in range(0, len(lines), step):
+            window_lines = lines[start_idx : start_idx + window_size]
+            if not window_lines:
+                break
+            sub_code = "\n".join(window_lines)
+            part_name = f"[text-chunk#{part_idx}]"
+            part_start = start_idx + 1
+            part_end = min(start_idx + len(window_lines), len(lines))
+            sub_enriched = build_enriched_text(
+                rel_path=rel_path,
+                language=lang,
+                symbol_name=part_name,
+                chunk_type="text_window",
+                signature="",
+                docstring=f"大文件纯文本分块 (第 {part_idx} 部分)",
+                route_info="",
+                decorators="",
+                code=sub_code,
+                module_name=mod_name,
+            )
+            chunks.append(
+                CodeChunk(
+                    id=str(uuid.uuid4()),
+                    file_path=rel_path,
+                    full_path=str(file_path),
+                    language=lang,
+                    symbol_name=part_name,
+                    chunk_type="text_window",
+                    start_line=part_start,
+                    end_line=part_end,
+                    code=sub_code,
+                    docstring=None,
+                    decorators="",
+                    route_info="",
+                    enriched_text=sub_enriched,
+                    calls="[]",
+                    module_name=mod_name,
+                    qualified_name=f"{mod_name}.{part_name}" if mod_name else part_name,
+                )
+            )
+            part_idx += 1
+            if start_idx + window_size >= len(lines):
+                break
+        return chunks
+
     def parse_file(self, file_path: Path) -> List[CodeChunk]:
         try:
             rel_path = str(file_path.relative_to(self.repo_root)).replace("\\", "/")
@@ -103,7 +165,22 @@ class UniversalCodeChunker:
         ext = file_path.suffix.lower()
         lang = EXTENSION_LANG_MAP.get(ext, "unknown")
 
-        symbols = self.ts_parser.parse_file(file_path, rel_path=rel_path)
+        # 1. 复杂度熔断：检查文件大小 (>1MB 自动降级为滑动窗口纯文本块)
+        try:
+            file_size = file_path.stat().st_size
+        except Exception:
+            file_size = 0
+
+        if file_size > 1024 * 1024:
+            return self._fallback_text_chunks(file_path, rel_path, lang)
+
+        # 2. 安全调用 AST 解析，任何异常安全降级
+        try:
+            symbols = self.ts_parser.parse_file(file_path, rel_path=rel_path)
+        except Exception as e:
+            sys.stderr.write(f"[code-search-mcp] AST 解析异常，降级为文本分块 {rel_path}: {e}\n")
+            return self._fallback_text_chunks(file_path, rel_path, lang)
+
         chunks: List[CodeChunk] = []
 
         if symbols:
@@ -268,8 +345,11 @@ class CodeIndexer:
         all_chunks: List[CodeChunk] = []
 
         for f in files:
-            file_chunks = chunker.parse_file(f)
-            all_chunks.extend(file_chunks)
+            try:
+                file_chunks = chunker.parse_file(f)
+                all_chunks.extend(file_chunks)
+            except Exception as e:
+                sys.stderr.write(f"[code-search-mcp] 警告: 处理文件 {f} 异常，跳过: {e}\n")
 
         total_chunks = len(all_chunks)
         sys.stderr.write(f"[code-search-mcp] 共切出 {total_chunks} 个多语言语义代码块\n")
@@ -447,7 +527,11 @@ class CodeIndexer:
 
         # 2. 重新解析新切片
         chunker = UniversalCodeChunker(self.repo_path)
-        new_chunks = chunker.parse_file(f)
+        try:
+            new_chunks = chunker.parse_file(f)
+        except Exception as e:
+            sys.stderr.write(f"[code-search-mcp] 警告: 增量解析文件 {f} 异常: {e}\n")
+            new_chunks = []
         if not new_chunks:
             try:
                 ProjectOutlineGenerator(self.repo_path).generate()
