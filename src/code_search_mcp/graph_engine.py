@@ -98,6 +98,25 @@ class CodeGraphEngine:
                 FOREIGN KEY(caller_id) REFERENCES nodes(id)
             );
 
+            CREATE TABLE IF NOT EXISTS resolved_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caller_id TEXT,
+                caller_symbol TEXT,
+                caller_file TEXT,
+                caller_module TEXT,
+                caller_qualified TEXT,
+                callee_id TEXT,
+                callee_symbol TEXT,
+                callee_file TEXT,
+                callee_qualified TEXT,
+                call_name TEXT,
+                resolution_type TEXT,
+                confidence REAL,
+                is_dynamic INTEGER DEFAULT 0,
+                dynamic_expr TEXT DEFAULT '',
+                FOREIGN KEY(caller_id) REFERENCES nodes(id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_nodes_sym ON nodes(symbol_name);
             CREATE INDEX IF NOT EXISTS idx_nodes_qual ON nodes(qualified_name);
             CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
@@ -106,6 +125,15 @@ class CodeGraphEngine:
             CREATE INDEX IF NOT EXISTS idx_calls_callee_qual ON calls(callee_qualified);
             CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller_symbol);
             CREATE INDEX IF NOT EXISTS idx_calls_caller_id ON calls(caller_id);
+
+            CREATE INDEX IF NOT EXISTS idx_resolved_callee_sym ON resolved_edges(callee_symbol);
+            CREATE INDEX IF NOT EXISTS idx_resolved_callee_qual ON resolved_edges(callee_qualified);
+            CREATE INDEX IF NOT EXISTS idx_resolved_callee_id ON resolved_edges(callee_id);
+            CREATE INDEX IF NOT EXISTS idx_resolved_caller_sym ON resolved_edges(caller_symbol);
+            CREATE INDEX IF NOT EXISTS idx_resolved_caller_id ON resolved_edges(caller_id);
+            CREATE INDEX IF NOT EXISTS idx_resolved_caller_file ON resolved_edges(caller_file);
+            CREATE INDEX IF NOT EXISTS idx_resolved_callee_file ON resolved_edges(callee_file);
+            CREATE INDEX IF NOT EXISTS idx_resolved_call_name ON resolved_edges(call_name);
         """)
         conn.commit()
 
@@ -121,6 +149,7 @@ class CodeGraphEngine:
         self._init_sqlite_schema(conn)
 
         # 清理旧数据，保证一致性
+        conn.execute("DELETE FROM resolved_edges;")
         conn.execute("DELETE FROM calls;")
         conn.execute("DELETE FROM nodes;")
 
@@ -223,9 +252,207 @@ class CodeGraphEngine:
                 calls_to_insert
             )
 
+        # Stage 2: 全局解析二次遍历 (Global Resolution Pass)，建立确定性拓扑边
+        self._resolve_all_edges(conn)
+
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (INDEX_SCHEMA_VERSION,))
         conn.commit()
         return True
+
+    def _resolve_all_edges(self, conn: sqlite3.Connection):
+        """Pass 2: 全局符号解析与拓扑链接 (Global Resolution Pass)
+        在所有文件完成 Stage 1 纯物理提取后，基于跨文件符号表与作用域层次执行二次匹配，
+        生成高确信度的 resolved_edges 确定性边表，彻底根除跨文件调用串线与盲目推测。
+        """
+        conn.execute("DELETE FROM resolved_edges;")
+
+        cursor = conn.execute("SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, docstring, route_info, module_name, qualified_name FROM nodes")
+        all_node_rows = cursor.fetchall()
+
+        by_id: Dict[str, sqlite3.Row] = {}
+        by_qual: Dict[str, List[sqlite3.Row]] = defaultdict(list)
+        by_sym: Dict[str, List[sqlite3.Row]] = defaultdict(list)
+        by_file_sym: Dict[Tuple[str, str], List[sqlite3.Row]] = defaultdict(list)
+        by_dir_sym: Dict[Tuple[str, str], List[sqlite3.Row]] = defaultdict(list)
+        by_mod_sym: Dict[Tuple[str, str], List[sqlite3.Row]] = defaultdict(list)
+
+        for r in all_node_rows:
+            by_id[r["id"]] = r
+            sym = r["symbol_name"]
+            qual = r["qualified_name"]
+            fpath = r["file_path"]
+            fdir = Path(fpath).parent.as_posix()
+            mod = r["module_name"]
+
+            if qual:
+                by_qual[qual].append(r)
+            if sym:
+                by_sym[sym].append(r)
+                by_file_sym[(fpath, sym)].append(r)
+                by_dir_sym[(fdir, sym)].append(r)
+                if mod:
+                    by_mod_sym[(mod, sym)].append(r)
+
+            if "." in sym:
+                short_name = sym.split(".")[-1]
+                by_sym[short_name].append(r)
+                by_file_sym[(fpath, short_name)].append(r)
+                by_dir_sym[(fdir, short_name)].append(r)
+                if mod:
+                    by_mod_sym[(mod, short_name)].append(r)
+
+        raw_calls_cursor = conn.execute("""
+            SELECT 
+                c.id, c.caller_id, c.caller_symbol, c.source_file,
+                n.module_name as caller_module, n.qualified_name as caller_qualified,
+                c.callee_name, c.callee_qualified, c.is_dynamic, c.dynamic_expr
+            FROM calls c
+            JOIN nodes n ON c.caller_id = n.id
+        """)
+        raw_calls = raw_calls_cursor.fetchall()
+
+        edges_to_insert = []
+        seen_edges = set()
+        batch_size = 500
+
+        for call in raw_calls:
+            caller_id = call["caller_id"]
+            caller_sym = call["caller_symbol"]
+            caller_file = call["source_file"]
+            caller_dir = Path(caller_file).parent.as_posix()
+            caller_mod = call["caller_module"] or ""
+            caller_qual = call["caller_qualified"] or ""
+            c_name = call["callee_name"]
+            c_qual = call["callee_qualified"] or ""
+            is_dyn = call["is_dynamic"]
+            dyn_expr = call["dynamic_expr"] or ""
+
+            target_node: Optional[sqlite3.Row] = None
+            res_type = "UNRESOLVED"
+            conf = 0.0
+
+            # Rule 1: 跨文件/模块完整限定名精确匹配 (EXACT_QUALIFIED)
+            if c_qual and c_qual in by_qual:
+                candidates = by_qual[c_qual]
+                if len(candidates) == 1:
+                    target_node = candidates[0]
+                    res_type = "EXACT_QUALIFIED"
+                    conf = 1.0
+
+            if not target_node and c_qual:
+                for qk, qnodes in by_qual.items():
+                    if qk.endswith(c_qual) or c_qual.endswith(qk):
+                        target_node = qnodes[0]
+                        res_type = "EXACT_QUALIFIED"
+                        conf = 0.95
+                        break
+
+            # Rule 2: 同文件内作用域匹配 (SAME_FILE)
+            if not target_node and c_name:
+                same_file_cands = by_file_sym.get((caller_file, c_name), [])
+                if same_file_cands:
+                    target_node = same_file_cands[0]
+                    res_type = "SAME_FILE"
+                    conf = 1.0
+                elif "." in caller_sym:
+                    cls_prefix = caller_sym.split(".")[0]
+                    method_key = f"{cls_prefix}.{c_name}"
+                    same_cls_cands = by_file_sym.get((caller_file, method_key), [])
+                    if same_cls_cands:
+                        target_node = same_cls_cands[0]
+                        res_type = "SAME_FILE"
+                        conf = 1.0
+
+            # Rule 3: 同目录/同包就近匹配 (SAME_DIR)
+            if not target_node and c_name:
+                dir_cands = by_dir_sym.get((caller_dir, c_name), [])
+                if len(dir_cands) == 1:
+                    target_node = dir_cands[0]
+                    res_type = "SAME_DIR"
+                    conf = 0.9
+                elif len(dir_cands) > 1:
+                    target_node = dir_cands[0]
+                    res_type = "AMBIGUOUS"
+                    conf = 0.4
+
+            # Rule 4: 同模块命名空间就近匹配 (SAME_MODULE)
+            if not target_node and c_name and caller_mod:
+                mod_cands = by_mod_sym.get((caller_mod, c_name), [])
+                if len(mod_cands) == 1:
+                    target_node = mod_cands[0]
+                    res_type = "SAME_MODULE"
+                    conf = 0.85
+
+            # Rule 5: 动态调用推断 (DYNAMIC)
+            if not target_node and is_dyn and c_name:
+                cands = by_sym.get(c_name, [])
+                if cands:
+                    sf = [n for n in cands if n["file_path"] == caller_file]
+                    sd = [n for n in cands if Path(n["file_path"]).parent.as_posix() == caller_dir]
+                    if sf:
+                        target_node = sf[0]
+                    elif sd:
+                        target_node = sd[0]
+                    else:
+                        target_node = cands[0]
+                    res_type = "DYNAMIC"
+                    conf = 0.7
+
+            # Rule 6: 全局唯一符号匹配 (GLOBAL_UNIQUE vs AMBIGUOUS)
+            if not target_node and c_name:
+                global_cands = by_sym.get(c_name, [])
+                if len(global_cands) == 1:
+                    target_node = global_cands[0]
+                    res_type = "GLOBAL_UNIQUE"
+                    conf = 0.8
+                elif len(global_cands) > 1:
+                    target_node = global_cands[0]
+                    res_type = "AMBIGUOUS"
+                    conf = 0.3
+
+            # Rule 7: 外部依赖或标准库调用 (EXTERNAL)
+            if not target_node:
+                res_type = "EXTERNAL"
+                conf = 1.0
+                callee_id = None
+                callee_sym = c_name
+                callee_file = None
+                callee_qual = c_qual or c_name
+            else:
+                callee_id = target_node["id"]
+                callee_sym = target_node["symbol_name"]
+                callee_file = target_node["file_path"]
+                callee_qual = target_node["qualified_name"] or target_node["symbol_name"]
+
+            edge_key = (caller_id, callee_id, c_name, res_type, is_dyn)
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+
+            edges_to_insert.append((
+                caller_id, caller_sym, caller_file, caller_mod, caller_qual,
+                callee_id, callee_sym, callee_file, callee_qual, c_name,
+                res_type, conf, is_dyn, dyn_expr
+            ))
+
+            if len(edges_to_insert) >= batch_size:
+                conn.executemany("""
+                    INSERT INTO resolved_edges (
+                        caller_id, caller_symbol, caller_file, caller_module, caller_qualified,
+                        callee_id, callee_symbol, callee_file, callee_qualified, call_name,
+                        resolution_type, confidence, is_dynamic, dynamic_expr
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, edges_to_insert)
+                edges_to_insert.clear()
+
+        if edges_to_insert:
+            conn.executemany("""
+                INSERT INTO resolved_edges (
+                    caller_id, caller_symbol, caller_file, caller_module, caller_qualified,
+                    callee_id, callee_symbol, callee_file, callee_qualified, call_name,
+                    resolution_type, confidence, is_dynamic, dynamic_expr
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, edges_to_insert)
 
     @classmethod
     def get_instance(cls, repo_path: str | Path) -> "CodeGraphEngine":
@@ -273,8 +500,10 @@ class CodeGraphEngine:
         if self.sqlite_path.exists():
             try:
                 conn = self._get_db()
-                row = conn.execute("SELECT count(*) as c FROM nodes").fetchone()
-                if row and row['c'] > 0:
+                self._init_sqlite_schema(conn)
+                row_nodes = conn.execute("SELECT count(*) as c FROM nodes").fetchone()
+                row_edges = conn.execute("SELECT count(*) as c FROM resolved_edges").fetchone()
+                if row_nodes and row_nodes['c'] > 0 and row_edges and row_edges['c'] > 0:
                     self._loaded = True
                     return True
             except Exception:
@@ -378,16 +607,26 @@ class CodeGraphEngine:
             }
 
         conn = self._get_db()
-        target_keys = [symbol_name]
+        # 如果 symbol_name 包含限定名，则精确按限定名查找目标定义；否则按 symbol_name 查找全库对应定义
         if "." in symbol_name:
-            target_keys.append(symbol_name.split(".")[-1])
+            cursor = conn.execute(
+                "SELECT id, symbol_name, qualified_name, file_path, start_line FROM nodes WHERE qualified_name = ? OR symbol_name = ?",
+                (symbol_name, symbol_name),
+            )
+            def_rows = cursor.fetchall()
+            if not def_rows:
+                cursor = conn.execute(
+                    "SELECT id, symbol_name, qualified_name, file_path, start_line FROM nodes WHERE qualified_name LIKE ? OR symbol_name = ?",
+                    (f"%.{symbol_name}", symbol_name),
+                )
+                def_rows = cursor.fetchall()
+        else:
+            cursor = conn.execute(
+                "SELECT id, symbol_name, qualified_name, file_path, start_line FROM nodes WHERE symbol_name = ? OR qualified_name = ?",
+                (symbol_name, symbol_name),
+            )
+            def_rows = cursor.fetchall()
 
-        placeholders = ",".join("?" for _ in target_keys)
-        cursor = conn.execute(
-            f"SELECT id, symbol_name, qualified_name, file_path, start_line FROM nodes WHERE symbol_name IN ({placeholders}) OR qualified_name IN ({placeholders})",
-            target_keys + target_keys,
-        )
-        def_rows = cursor.fetchall()
         is_defined_in_repo = len(def_rows) > 0
         unique_defs = list({f"{r['file_path']}:{r['start_line']}": r for r in def_rows}.values())
         is_ambiguous_def = len(unique_defs) > 1
@@ -397,17 +636,38 @@ class CodeGraphEngine:
             else []
         )
 
-        # 按需从 SQLite 查询调用者 (通过 B-Tree 索引秒查)
-        query_sql = f"""
-            SELECT DISTINCT
-                n.id, n.symbol_name, n.chunk_type, n.file_path, n.start_line, n.end_line,
-                n.route_info, n.docstring, n.code, c.is_dynamic, c.dynamic_expr
-            FROM calls c
-            JOIN nodes n ON c.caller_id = n.id
-            WHERE c.callee_name IN ({placeholders}) OR c.callee_qualified IN ({placeholders})
-        """
-        cursor = conn.execute(query_sql, target_keys + target_keys)
-        caller_rows = cursor.fetchall()
+        target_node_ids = [r['id'] for r in def_rows]
+
+        # 按需从 SQLite resolved_edges 查询确定性拓扑调用者 (高确信度过滤)
+        if target_node_ids:
+            id_placeholders = ",".join("?" for _ in target_node_ids)
+            query_sql = f"""
+                SELECT DISTINCT
+                    n.id, n.symbol_name, n.chunk_type, n.file_path, n.start_line, n.end_line,
+                    n.route_info, n.docstring, n.code, e.is_dynamic, e.dynamic_expr,
+                    e.resolution_type, e.confidence, e.callee_qualified
+                FROM resolved_edges e
+                JOIN nodes n ON e.caller_id = n.id
+                WHERE e.callee_id IN ({id_placeholders})
+                  AND e.resolution_type != 'EXTERNAL'
+                ORDER BY e.confidence DESC, n.file_path, n.start_line
+            """
+            cursor = conn.execute(query_sql, target_node_ids)
+            caller_rows = cursor.fetchall()
+        else:
+            query_sql = """
+                SELECT DISTINCT
+                    n.id, n.symbol_name, n.chunk_type, n.file_path, n.start_line, n.end_line,
+                    n.route_info, n.docstring, n.code, e.is_dynamic, e.dynamic_expr,
+                    e.resolution_type, e.confidence, e.callee_qualified
+                FROM resolved_edges e
+                JOIN nodes n ON e.caller_id = n.id
+                WHERE (e.callee_symbol = ? OR e.callee_qualified = ? OR e.call_name = ?)
+                  AND e.resolution_type != 'EXTERNAL'
+                ORDER BY e.confidence DESC, n.file_path, n.start_line
+            """
+            cursor = conn.execute(query_sql, (symbol_name, symbol_name, symbol_name))
+            caller_rows = cursor.fetchall()
 
         matched_callers = []
         callers_seen = set()
@@ -433,6 +693,8 @@ class CodeGraphEngine:
                         "code_preview": preview,
                         "is_dynamic": bool(r['is_dynamic']),
                         "dynamic_expr": r['dynamic_expr'] or "",
+                        "resolution_type": r['resolution_type'],
+                        "confidence": float(r['confidence']),
                     }
                 )
 
@@ -481,71 +743,32 @@ class CodeGraphEngine:
 
         cursor = conn.execute(
             """
-            SELECT DISTINCT callee_name, callee_qualified, is_dynamic, dynamic_expr
-            FROM calls
-            WHERE caller_symbol = ? OR caller_symbol = ?
-            ORDER BY callee_name
+            SELECT DISTINCT 
+                e.callee_id, e.callee_symbol, e.callee_qualified, e.callee_file,
+                e.call_name, e.resolution_type, e.confidence, e.is_dynamic, e.dynamic_expr,
+                n.chunk_type, n.start_line, n.docstring
+            FROM resolved_edges e
+            LEFT JOIN nodes n ON e.callee_id = n.id
+            WHERE e.caller_id = ? OR e.caller_symbol = ? OR e.caller_qualified = ?
+            ORDER BY e.confidence DESC, e.call_name
             """,
-            (caller_node['symbol_name'], symbol_name),
+            (caller_node['id'], caller_node['symbol_name'], symbol_name),
         )
-        call_rows = cursor.fetchall()
+        edge_rows = cursor.fetchall()
 
         callees_detail = []
-        for crow in call_rows:
-            c_name = crow['callee_name']
-            c_qual = crow['callee_qualified']
-            is_dyn = bool(crow['is_dynamic'])
-            dyn_expr = crow['dynamic_expr'] or ""
-
-            target_keys = [k for k in (c_qual, c_name) if k]
-            if not target_keys:
+        seen_callees = set()
+        for erow in edge_rows:
+            c_name = erow['call_name']
+            if c_name in seen_callees:
                 continue
+            seen_callees.add(c_name)
 
-            ph = ",".join("?" for _ in target_keys)
-            c_cursor = conn.execute(
-                f"SELECT id, symbol_name, qualified_name, chunk_type, file_path, start_line, docstring FROM nodes WHERE qualified_name IN ({ph}) OR symbol_name IN ({ph})",
-                target_keys + target_keys,
-            )
-            cand_rows = c_cursor.fetchall()
+            is_dyn = bool(erow['is_dynamic'])
+            dyn_expr = erow['dynamic_expr'] or ""
+            res_type = erow['resolution_type']
 
-            if cand_rows:
-                cand_nodes = [
-                    SymbolNode(
-                        id=r['id'],
-                        file_path=r['file_path'],
-                        symbol_name=r['symbol_name'],
-                        chunk_type=r['chunk_type'],
-                        start_line=r['start_line'],
-                        end_line=r['start_line'],
-                        code="",
-                        docstring=r['docstring'],
-                        route_info="",
-                        calls=[],
-                        module_name="",
-                        qualified_name=r['qualified_name'],
-                    )
-                    for r in cand_rows
-                ]
-                def_node, is_ambig, cand_list = self.disambiguate_target(caller_file, c_name, cand_nodes)
-                doc = def_node.docstring if def_node else ""
-                if is_dyn and dyn_expr:
-                    doc = f"[⚡ 动态调用: {dyn_expr}] " + doc
-                callees_detail.append(
-                    {
-                        "target_symbol": c_name,
-                        "defined_in_repo": True,
-                        "file_path": def_node.file_path if def_node else None,
-                        "qualified_name": def_node.qualified_name if def_node else "",
-                        "symbol_type": def_node.chunk_type if def_node else "symbol",
-                        "start_line": def_node.start_line if def_node else None,
-                        "docstring": doc,
-                        "ambiguous": is_ambig,
-                        "candidates": cand_list,
-                        "is_dynamic": is_dyn,
-                        "dynamic_expr": dyn_expr,
-                    }
-                )
-            else:
+            if res_type == "EXTERNAL" or erow['callee_id'] is None:
                 doc = f"[⚡ 动态调用: {dyn_expr}]" if (is_dyn and dyn_expr) else ""
                 callees_detail.append(
                     {
@@ -560,6 +783,39 @@ class CodeGraphEngine:
                         "candidates": [],
                         "is_dynamic": is_dyn,
                         "dynamic_expr": dyn_expr,
+                        "resolution_type": res_type,
+                        "confidence": float(erow['confidence']),
+                    }
+                )
+            else:
+                doc = erow['docstring'] or ""
+                if is_dyn and dyn_expr:
+                    doc = f"[⚡ 动态调用: {dyn_expr}] " + doc
+
+                is_ambig = (res_type == "AMBIGUOUS")
+                cand_list = []
+                if is_ambig:
+                    c_cursor = conn.execute(
+                        "SELECT qualified_name, symbol_name, file_path, start_line FROM nodes WHERE symbol_name = ? OR symbol_name LIKE ?",
+                        (c_name, f"%.{c_name}")
+                    )
+                    cand_list = [f"{r['qualified_name'] or r['symbol_name']} ({r['file_path']}#L{r['start_line']})" for r in c_cursor.fetchall()]
+
+                callees_detail.append(
+                    {
+                        "target_symbol": c_name,
+                        "defined_in_repo": True,
+                        "file_path": erow['callee_file'],
+                        "qualified_name": erow['callee_qualified'] or "",
+                        "symbol_type": erow['chunk_type'] or "symbol",
+                        "start_line": erow['start_line'],
+                        "docstring": doc,
+                        "ambiguous": is_ambig,
+                        "candidates": cand_list,
+                        "is_dynamic": is_dyn,
+                        "dynamic_expr": dyn_expr,
+                        "resolution_type": res_type,
+                        "confidence": float(erow['confidence']),
                     }
                 )
 
@@ -594,21 +850,51 @@ class CodeGraphEngine:
                 continue
             visited_symbols.add(curr_sym)
 
-            keys = [curr_sym]
             if "." in curr_sym:
-                keys.append(curr_sym.split(".")[-1])
+                cur_defs = conn.execute(
+                    "SELECT id FROM nodes WHERE qualified_name = ? OR symbol_name = ?",
+                    (curr_sym, curr_sym)
+                ).fetchall()
+                if not cur_defs:
+                    cur_defs = conn.execute(
+                        "SELECT id FROM nodes WHERE qualified_name LIKE ? OR symbol_name = ?",
+                        (f"%.{curr_sym}", curr_sym)
+                    ).fetchall()
+            else:
+                cur_defs = conn.execute(
+                    "SELECT id FROM nodes WHERE symbol_name = ? OR qualified_name = ?",
+                    (curr_sym, curr_sym)
+                ).fetchall()
 
-            ph = ",".join("?" for _ in keys)
-            cursor = conn.execute(
-                f"""
-                SELECT DISTINCT n.id, n.symbol_name, n.chunk_type, n.file_path, n.start_line, n.route_info, c.is_dynamic, c.dynamic_expr
-                FROM calls c
-                JOIN nodes n ON c.caller_id = n.id
-                WHERE c.callee_name IN ({ph}) OR c.callee_qualified IN ({ph})
-                """,
-                keys + keys,
-            )
-            callers = cursor.fetchall()
+            cur_ids = [d['id'] for d in cur_defs]
+
+            if cur_ids:
+                id_ph = ",".join("?" for _ in cur_ids)
+                query_sql = f"""
+                    SELECT DISTINCT 
+                        n.id, n.symbol_name, n.chunk_type, n.file_path, n.start_line, 
+                        n.route_info, e.is_dynamic, e.dynamic_expr, e.resolution_type, e.confidence
+                    FROM resolved_edges e
+                    JOIN nodes n ON e.caller_id = n.id
+                    WHERE e.callee_id IN ({id_ph})
+                      AND e.confidence >= 0.5
+                      AND e.resolution_type != 'EXTERNAL'
+                """
+                cursor = conn.execute(query_sql, cur_ids)
+                callers = cursor.fetchall()
+            else:
+                query_sql = """
+                    SELECT DISTINCT 
+                        n.id, n.symbol_name, n.chunk_type, n.file_path, n.start_line, 
+                        n.route_info, e.is_dynamic, e.dynamic_expr, e.resolution_type, e.confidence
+                    FROM resolved_edges e
+                    JOIN nodes n ON e.caller_id = n.id
+                    WHERE (e.callee_symbol = ? OR e.callee_qualified = ? OR e.call_name = ?)
+                      AND e.confidence >= 0.5
+                      AND e.resolution_type != 'EXTERNAL'
+                """
+                cursor = conn.execute(query_sql, (curr_sym, curr_sym, curr_sym))
+                callers = cursor.fetchall()
 
             for c in callers:
                 impacted_files.add(c['file_path'])
