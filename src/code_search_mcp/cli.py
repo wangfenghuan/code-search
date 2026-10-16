@@ -132,6 +132,18 @@ def main():
     install_parser.add_argument("--repo", "-r", default="", help="目标代码库根目录路径（用于初始化规则，默认当前目录）")
     install_parser.add_argument("--no-rules", action="store_true", help="跳过自动写入 CLAUDE.md 与 .cursorrules 规范")
 
+    # cache 子命令 (查看全局缓存状态与占用)
+    cache_parser = subparsers.add_parser("cache", help="查看全局索引缓存清单与磁盘占用")
+    cache_parser.add_argument("--json", action="store_true", help="以 JSON 格式输出统计信息")
+
+    # clean 子命令 (清理缓存与释放磁盘空间)
+    clean_parser = subparsers.add_parser("clean", help="清理代码库索引缓存与无用临时数据")
+    clean_parser.add_argument("--all", "-a", action="store_true", help="清空所有代码库的缓存数据")
+    clean_parser.add_argument("--orphaned", "-o", action="store_true", help="仅清理项目源目录已不存在的孤儿幽灵缓存（默认推荐）")
+    clean_parser.add_argument("--days", "-d", type=int, default=None, help="清理超过指定天数未更新的陈旧缓存")
+    clean_parser.add_argument("--path", "-p", default="", help="仅清理指定代码库的缓存（默认当前或指定项目）")
+    clean_parser.add_argument("--dry-run", action="store_true", help="模拟预览将要清理的内容和释放的磁盘空间，不实际删除")
+
     # serve 子命令（默认或作为 MCP 启动）
     serve_parser = subparsers.add_parser("serve", help="以 MCP stdio 协议启动服务")
 
@@ -266,6 +278,74 @@ def main():
             target_repo=target,
             write_rules=not args.no_rules,
         )
+
+    elif args.command == "cache":
+        import json
+        from datetime import datetime
+        from code_search_mcp.cache_manager import CacheManager
+
+        mgr = CacheManager()
+        summary = mgr.get_summary()
+
+        if args.json:
+            entries = [
+                {
+                    "hash": e.hash_id,
+                    "repo_path": e.repo_path,
+                    "repo_exists": e.repo_exists,
+                    "size_mb": e.size_mb,
+                    "indexed_files": e.indexed_files,
+                    "indexed_chunks": e.indexed_chunks,
+                    "last_updated": datetime.fromtimestamp(e.last_updated).strftime("%Y-%m-%d %H:%M:%S") if e.last_updated else None,
+                }
+                for e in mgr.list_entries()
+            ]
+            print(json.dumps({"summary": summary, "entries": entries}, ensure_ascii=False, indent=2))
+        else:
+            entries = mgr.list_entries()
+            print("\n" + "=" * 70)
+            print(f"📦 code-search-mcp 全局索引缓存清单 (存储根目录: {summary['cache_root']})")
+            print("=" * 70)
+            if not entries:
+                print("   暂无任何索引缓存记录。")
+            else:
+                for i, e in enumerate(entries, 1):
+                    status_tag = "✅ 有效" if e.repo_exists else "⚠️  孤儿(源码已失效)"
+                    up_str = datetime.fromtimestamp(e.last_updated).strftime("%Y-%m-%d %H:%M") if e.last_updated else "未知"
+                    r_path = e.repo_path or f"<哈希: {e.hash_id}>"
+                    print(f"[{i:2d}] {status_tag} | 占用: {e.size_mb:>6.2f} MB | 切片: {e.indexed_chunks} 块 ({e.indexed_files} 文件) | 更新: {up_str}")
+                    print(f"     源码路径: {r_path}")
+
+            print("-" * 70)
+            print(f"📊 汇总: 共 {summary['total_entries']} 个项目缓存 | 总占用: {summary['total_size_mb']:.2f} MB")
+            if summary['orphaned_entries'] > 0:
+                print(f"💡 发现 {summary['orphaned_entries']} 个已删除项目的孤儿幽灵缓存 ({summary['orphaned_size_mb']:.2f} MB)")
+                print(f"   运行 `code-search-mcp clean --orphaned` 可一键清理释放空间。")
+            print("=" * 70 + "\n")
+
+    elif args.command == "clean":
+        from code_search_mcp.cache_manager import CacheManager
+
+        mgr = CacheManager()
+        # 如果未指定特殊参数，默认以孤儿清理为主
+        is_orphaned = args.orphaned or (not args.all and not args.days and not args.path)
+        res = mgr.clean(
+            all_caches=args.all,
+            orphaned_only=is_orphaned,
+            older_than_days=args.days,
+            target_repo=args.path if args.path else None,
+            dry_run=args.dry_run,
+        )
+
+        prefix = "🔍 [模拟预览]" if res["dry_run"] else "🧹 [已清理]"
+        print(f"\n{prefix} 匹配到 {res['matched_entries']} 个缓存项目，释放磁盘空间: {res['freed_mb']:.2f} MB")
+        for item in res["deleted_items"]:
+            print(f"   • {item['hash']}: {item['repo_path']} ({item['size_mb']} MB)")
+
+        if res["dry_run"]:
+            print("\n💡 以上为模拟结果。去掉 --dry-run 即可真正执行清理。")
+        else:
+            print(f"\n✅ 清理完成！成功释放 {res['freed_mb']:.2f} MB 空间。\n")
 
 
 if __name__ == "__main__":
