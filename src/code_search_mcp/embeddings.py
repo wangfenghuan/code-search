@@ -71,7 +71,8 @@ class EmbeddingEngine:
         return cls._instance
 
     def _init_model(self, providers: List[str]) -> TextEmbedding:
-        threads = max(1, os.cpu_count() or 4)
+        # 限制最大并行线程数为 4（或由环境变量指定），避免 ONNX Runtime 线程工作区显存/内存峰值过高引起 OOM
+        threads = int(os.environ.get("EMBEDDING_THREADS", min(4, max(1, os.cpu_count() or 4))))
         hw_desc = providers[0].replace("ExecutionProvider", "")
         self._current_provider = providers[0]
 
@@ -112,8 +113,8 @@ class EmbeddingEngine:
         self._current_provider = "CPUExecutionProvider"
         self._model = self._init_model(["CPUExecutionProvider"])
 
-    def embed_documents(self, texts: Sequence[str], batch_size: int = 128) -> List[List[float]]:
-        """批量对代码块或文本生成向量列表 (扩大 batch_size=128，硬件加速异常自动降级 CPU 兜底)"""
+    def embed_documents(self, texts: Sequence[str], batch_size: int = 64) -> List[List[float]]:
+        """批量对代码块或文本生成向量列表 (安全批大小 64 兼顾吞吐与内存，硬件加速异常自动降级 CPU 兜底)"""
         if not texts:
             return []
         try:

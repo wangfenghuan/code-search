@@ -68,6 +68,10 @@ class CodeGraphEngine:
                 pass
             self._conn = None
 
+    def close(self):
+        """释放底层 SQLite 数据库连接与内存句柄"""
+        self._close_db()
+
     def _init_sqlite_schema(self, conn: sqlite3.Connection):
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS meta (
@@ -295,7 +299,7 @@ class CodeGraphEngine:
         """
         conn.execute("DELETE FROM resolved_edges;")
 
-        cursor = conn.execute("SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, docstring, route_info, module_name, qualified_name FROM nodes")
+        cursor = conn.execute("SELECT id, symbol_name, chunk_type, file_path, module_name, qualified_name FROM nodes")
         all_node_rows = cursor.fetchall()
 
         by_id: Dict[str, sqlite3.Row] = {}
@@ -565,6 +569,21 @@ class CodeGraphEngine:
                     resolution_type, confidence, is_dynamic, dynamic_expr
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, edges_to_insert)
+
+        # 立即释放图解析阶段的大型内存结构，彻底杜绝内存驻留导致后续向量嵌入 OOM
+        del all_node_rows
+        del raw_calls
+        edges_to_insert.clear()
+        seen_edges.clear()
+        by_id.clear()
+        by_qual.clear()
+        by_sym.clear()
+        by_file_sym.clear()
+        by_dir_sym.clear()
+        by_mod_sym.clear()
+        by_qual_tail.clear()
+        import gc
+        gc.collect()
 
     @classmethod
     def get_instance(cls, repo_path: str | Path) -> "CodeGraphEngine":
