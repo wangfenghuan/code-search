@@ -1,9 +1,21 @@
 import sys
-from typing import Generator, Iterable, List, Sequence
+from pathlib import Path
+from typing import Generator, Iterable, List, Optional, Sequence
 import numpy as np
 from fastembed import TextEmbedding
 
 from code_search_mcp.config import DEFAULT_MODEL_NAME
+
+
+def get_bundled_model_dir(model_name: str) -> Optional[Path]:
+    """检测代码库内是否随附了离线预打包的模型文件 (零网络离线秒启)"""
+    base_models_dir = Path(__file__).resolve().parent / "models"
+    # 例如 "BAAI/bge-small-zh-v1.5" -> "bge-small-zh-v1.5"
+    slug = model_name.split("/")[-1]
+    candidate = base_models_dir / slug
+    if candidate.exists() and (candidate / "model_optimized.onnx").exists():
+        return candidate
+    return None
 
 
 class EmbeddingEngine:
@@ -25,10 +37,20 @@ class EmbeddingEngine:
     @property
     def model(self) -> TextEmbedding:
         if self._model is None:
-            # 日志仅允许打在 stderr，防止污染 MCP stdio
-            sys.stderr.write(f"[code-search-mcp] 正在加载本地 Embedding 模型: {self.model_name}\n")
-            sys.stderr.flush()
-            self._model = TextEmbedding(model_name=self.model_name)
+            # 优先使用代码库内置的模型文件，实现免下载纯离线极速秒启
+            bundled_path = get_bundled_model_dir(self.model_name)
+            if bundled_path:
+                sys.stderr.write(f"[code-search-mcp] 加载代码库内置离线模型: {self.model_name} (零网络极速加载)\n")
+                sys.stderr.flush()
+                self._model = TextEmbedding(
+                    model_name=self.model_name,
+                    specific_model_path=str(bundled_path),
+                    local_files_only=True,
+                )
+            else:
+                sys.stderr.write(f"[code-search-mcp] 正在加载 Embedding 模型: {self.model_name}\n")
+                sys.stderr.flush()
+                self._model = TextEmbedding(model_name=self.model_name)
             sys.stderr.write(f"[code-search-mcp] 模型加载完成\n")
             sys.stderr.flush()
         return self._model
