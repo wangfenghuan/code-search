@@ -675,6 +675,7 @@ class TreeSitterParser:
             if all_file_calls:
                 all_file_calls.sort(key=lambda x: x[0])
             call_starts = [x[0] for x in all_file_calls]
+            cls_starts = [c["start"] for c in classes]
 
             for pat, cap in cursor_fn.matches(root):
                 def_node = cap["fn.def"][0]
@@ -692,7 +693,6 @@ class TreeSitterParser:
                 # classes 在进入本循环前已按 start_byte 升序排列（由 tree-sitter 查询顺序保证）
                 parent_cls = None
                 # 用 bisect 找出所有 start <= s_byte 的类（候选集），再过滤 end >= e_byte
-                cls_starts = [c["start"] for c in classes]
                 hi = bisect.bisect_right(cls_starts, s_byte)
                 best_span = None
                 for c in classes[:hi]:
