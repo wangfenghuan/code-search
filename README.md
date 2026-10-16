@@ -122,7 +122,7 @@ docker build -t code-search-mcp:latest .
 # 启动容器
 docker run -i --rm -v "$(pwd):/workspace" code-search-mcp:latest serve
 ```
-> 📖 详细 Docker 命令请参阅 [Docker 完整部署指南 (DOCKER_GUIDE.md)](DOCKER_GUIDE.md)。
+> 📖 详细 Docker 命令请参阅 [Docker 完整部署指南 (docs/docker_guide.md)](docs/docker_guide.md)。
 
 ---
 

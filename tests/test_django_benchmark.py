@@ -336,7 +336,9 @@ def main():
     res_agent = run_django_agent_exploration(django_core)
     run_django_token_economics()
 
-    report_path = ROOT_DIR / "tests" / "benchmark_report_django.json"
+    report_dir = ROOT_DIR / "tests" / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "benchmark_report_django.json"
     full_report = {
         "repo": "django/django",
         "extraction": res_extract,

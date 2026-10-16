@@ -269,7 +269,9 @@ def main():
         "graph_resolution": graph_res,
         "token_economics": token_res,
     }
-    report_file = ROOT_DIR / "tests" / "benchmark_report_vscode.json"
+    report_dir = ROOT_DIR / "tests" / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_file = report_dir / "benchmark_report_vscode.json"
     report_file.write_text(json.dumps(report_data, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n📄 基准测试详细数据已写入: {report_file}")
 

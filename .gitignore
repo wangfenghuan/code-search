@@ -31,6 +31,7 @@ env/
 # Benchmark repositories & local test databases
 tests/benchmark_repos/
 tests/*.json
+tests/reports/*.json
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
