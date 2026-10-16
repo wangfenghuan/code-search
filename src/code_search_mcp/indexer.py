@@ -342,8 +342,8 @@ class CodeIndexer:
                     matched_files.append(Path(root) / file)
         return matched_files
 
-    def index_all(self, batch_size: int = 32) -> Dict[str, Any]:
-        """全量切片、提取架构大纲、向量化并存储至 LanceDB"""
+    def index_all(self, batch_size: int = 128) -> Dict[str, Any]:
+        """全量切片、提前预构建图谱、硬件加速向量化并存储至 LanceDB"""
         sys.stderr.write(f"[code-search-mcp] 开始扫描多语言代码库: {self.repo_path}\n")
         files = self.scan_files()
         sys.stderr.write(f"[code-search-mcp] 找到 {len(files)} 个源文件 (Python/TS/JS/Go)\n")
@@ -373,10 +373,60 @@ class CodeIndexer:
                 "indexed_chunks": 0,
             }
 
-        # 批量向量化
-        texts = [chunk.enriched_text for chunk in all_chunks]
-        sys.stderr.write(f"[code-search-mcp] 正在批量生成向量嵌入...\n")
-        vectors = self.embedding_engine.embed_documents(texts, batch_size=batch_size)
+        # 1. 同步预构建 CodeGraph 知识图谱 (Eager Graph Build)，彻底消除首次查询冷启动延迟
+        try:
+            from code_search_mcp.graph_engine import CodeGraphEngine
+            sys.stderr.write(f"[code-search-mcp] 正在预构建代码调用图谱与全局拓扑消歧...\n")
+            sys.stderr.flush()
+            graph_engine = CodeGraphEngine.get_instance(self.repo_path)
+            graph_engine.build_from_chunks(all_chunks)
+        except Exception as e:
+            sys.stderr.write(f"[code-search-mcp] 预构建图谱提示: {e}\n")
+
+        # 2. 尝试从已有 LanceDB 库中复用未改动代码块的向量 (Content-Hash Vector Reuse)
+        existing_vectors_map: Dict[str, Any] = {}
+        try:
+            db_conn = lancedb.connect(str(self.db_path))
+            resp = db_conn.list_tables() if hasattr(db_conn, "list_tables") else db_conn.table_names()
+            tables = resp.tables if hasattr(resp, "tables") else list(resp)
+            if "code_chunks" in tables:
+                old_tbl = db_conn.open_table("code_chunks")
+                arrow_data = old_tbl.to_arrow()
+                files_col = arrow_data.column("file_path").to_pylist()
+                sym_col = arrow_data.column("symbol_name").to_pylist()
+                start_col = arrow_data.column("start_line").to_pylist()
+                code_col = arrow_data.column("code").to_pylist()
+                vec_col = arrow_data.column("vector").to_pylist()
+                for f_p, s_n, s_l, c_d, v_c in zip(files_col, sym_col, start_col, code_col, vec_col):
+                    key = f"{f_p}:{s_n}:{s_l}"
+                    existing_vectors_map[key] = (c_d, v_c)
+        except Exception:
+            existing_vectors_map.clear()
+
+        # 区分已命中缓存与需要重新推理的代码块
+        vectors: List[Any] = [None] * total_chunks
+        chunks_to_embed: List[str] = []
+        indices_to_embed: List[int] = []
+
+        for idx, chunk in enumerate(all_chunks):
+            key = f"{chunk.file_path}:{chunk.symbol_name}:{chunk.start_line}"
+            if key in existing_vectors_map and existing_vectors_map[key][0] == chunk.code:
+                vectors[idx] = existing_vectors_map[key][1]
+            else:
+                chunks_to_embed.append(chunk.enriched_text)
+                indices_to_embed.append(idx)
+
+        reused_count = total_chunks - len(chunks_to_embed)
+        if reused_count > 0:
+            sys.stderr.write(f"[code-search-mcp] 命中向量缓存: {reused_count} 个代码块已复用，仅需推理 {len(chunks_to_embed)} 个新/改动代码块\n")
+            sys.stderr.flush()
+
+        if chunks_to_embed:
+            sys.stderr.write(f"[code-search-mcp] 正在批量生成向量嵌入 ({len(chunks_to_embed)} 代码块)...\n")
+            sys.stderr.flush()
+            new_vectors = self.embedding_engine.embed_documents(chunks_to_embed, batch_size=batch_size or 128)
+            for idx, vec in zip(indices_to_embed, new_vectors):
+                vectors[idx] = vec
 
         # 组装 LanceDB 数据集
         data = []
@@ -436,7 +486,7 @@ class CodeIndexer:
         except Exception:
             pass
 
-        sys.stderr.write(f"[code-search-mcp] 索引构建完成！共 {len(files)} 文件，{total_chunks} 代码块\n")
+        sys.stderr.write(f"[code-search-mcp] 索引与调用图谱构建完成！共 {len(files)} 文件，{total_chunks} 代码块\n")
         return {
             "status": "success",
             "repo_path": str(self.repo_path),

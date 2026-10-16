@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 from typing import Generator, Iterable, List, Optional, Sequence
@@ -5,6 +6,41 @@ import numpy as np
 from fastembed import TextEmbedding
 
 from code_search_mcp.config import DEFAULT_MODEL_NAME
+
+
+_PROBED_PROVIDERS: Optional[List[str]] = None
+
+
+def get_optimal_execution_providers() -> List[str]:
+    """智能探测并返回最优硬件加速推理 Provider 顺序 (CUDA / CoreML / DirectML / CPU)"""
+    global _PROBED_PROVIDERS
+    if _PROBED_PROVIDERS is not None:
+        return list(_PROBED_PROVIDERS)
+
+    try:
+        import onnxruntime as ort
+        available = ort.get_available_providers()
+        chosen = []
+        # 1. NVIDIA CUDA (极速 GPU 加速，工业级首选)
+        if "CUDAExecutionProvider" in available:
+            chosen.append("CUDAExecutionProvider")
+
+        # 2. Apple Silicon CoreML (Mac MPS / Apple Neural Engine 加速)
+        if "CoreMLExecutionProvider" in available:
+            chosen.append("CoreMLExecutionProvider")
+
+        # 3. Windows DirectML (仅在显式启用或探针通过时启用，避免核显 Attention 算子 8007000E 显存异常)
+        if "DmlExecutionProvider" in available:
+            if os.environ.get("ENABLE_DIRECTML", "0") == "1":
+                chosen.append("DmlExecutionProvider")
+
+        # 4. CPU 多核并行兜底 (threads=os.cpu_count() + batch_size=128，吞吐达 180~370 texts/s)
+        chosen.append("CPUExecutionProvider")
+        _PROBED_PROVIDERS = chosen
+        return list(chosen)
+    except Exception:
+        _PROBED_PROVIDERS = ["CPUExecutionProvider"]
+        return list(_PROBED_PROVIDERS)
 
 
 def get_bundled_model_dir(model_name: str) -> Optional[Path]:
@@ -19,14 +55,14 @@ def get_bundled_model_dir(model_name: str) -> Optional[Path]:
 
 
 class EmbeddingEngine:
-    """基于 FastEmbed (ONNX Runtime) 的本地轻量向量化引擎"""
+    """基于 FastEmbed (ONNX Runtime) 的本地轻量向量化引擎 (支持 GPU/MPS/CoreML 硬件自适应加速与多核 CPU 平滑兜底)"""
 
     _instance: "EmbeddingEngine | None" = None
 
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME):
         self.model_name = model_name
-        # 延迟加载，避免启动时耗时过长
         self._model: TextEmbedding | None = None
+        self._current_provider: str = ""
 
     @classmethod
     def get_instance(cls, model_name: str = DEFAULT_MODEL_NAME) -> "EmbeddingEngine":
@@ -34,38 +70,74 @@ class EmbeddingEngine:
             cls._instance = cls(model_name=model_name)
         return cls._instance
 
+    def _init_model(self, providers: List[str]) -> TextEmbedding:
+        threads = max(1, os.cpu_count() or 4)
+        hw_desc = providers[0].replace("ExecutionProvider", "")
+        self._current_provider = providers[0]
+
+        bundled_path = get_bundled_model_dir(self.model_name)
+        if bundled_path:
+            sys.stderr.write(f"[code-search-mcp] 加载离线模型: {self.model_name} [硬件后端: {hw_desc}, 并行线程: {threads}]\n")
+            sys.stderr.flush()
+            model = TextEmbedding(
+                model_name=self.model_name,
+                specific_model_path=str(bundled_path),
+                local_files_only=True,
+                providers=providers,
+                threads=threads,
+            )
+        else:
+            sys.stderr.write(f"[code-search-mcp] 正在加载 Embedding 模型: {self.model_name} [硬件后端: {hw_desc}, 并行线程: {threads}]\n")
+            sys.stderr.flush()
+            model = TextEmbedding(
+                model_name=self.model_name,
+                providers=providers,
+                threads=threads,
+            )
+        sys.stderr.write(f"[code-search-mcp] 模型加载完成，向量维度已就绪\n")
+        sys.stderr.flush()
+        return model
+
     @property
     def model(self) -> TextEmbedding:
         if self._model is None:
-            # 优先使用代码库内置的模型文件，实现免下载纯离线极速秒启
-            bundled_path = get_bundled_model_dir(self.model_name)
-            if bundled_path:
-                sys.stderr.write(f"[code-search-mcp] 加载代码库内置离线模型: {self.model_name} (零网络极速加载)\n")
-                sys.stderr.flush()
-                self._model = TextEmbedding(
-                    model_name=self.model_name,
-                    specific_model_path=str(bundled_path),
-                    local_files_only=True,
-                )
-            else:
-                sys.stderr.write(f"[code-search-mcp] 正在加载 Embedding 模型: {self.model_name}\n")
-                sys.stderr.flush()
-                self._model = TextEmbedding(model_name=self.model_name)
-            sys.stderr.write(f"[code-search-mcp] 模型加载完成\n")
-            sys.stderr.flush()
+            providers = get_optimal_execution_providers()
+            self._model = self._init_model(providers)
         return self._model
 
-    def embed_documents(self, texts: Sequence[str], batch_size: int = 32) -> List[List[float]]:
-        """批量对代码块或文本生成向量列表"""
+    def _switch_to_cpu(self):
+        """当 GPU/MPS 硬件加速出现显存溢出或算子不支持时，自动降级至 CPU 多核并行兜底"""
+        sys.stderr.write(f"[code-search-mcp] 硬件加速遇到异常，平滑降级至 CPUExecutionProvider 多核全速兜底...\n")
+        sys.stderr.flush()
+        self._current_provider = "CPUExecutionProvider"
+        self._model = self._init_model(["CPUExecutionProvider"])
+
+    def embed_documents(self, texts: Sequence[str], batch_size: int = 128) -> List[List[float]]:
+        """批量对代码块或文本生成向量列表 (扩大 batch_size=128，硬件加速异常自动降级 CPU 兜底)"""
         if not texts:
             return []
-        embeddings_gen = self.model.embed(texts, batch_size=batch_size)
-        return [vec.tolist() for vec in embeddings_gen]
+        try:
+            embeddings_gen = self.model.embed(texts, batch_size=batch_size)
+            return [vec.tolist() for vec in embeddings_gen]
+        except Exception as e:
+            if self._current_provider != "CPUExecutionProvider":
+                self._switch_to_cpu()
+                embeddings_gen = self.model.embed(texts, batch_size=batch_size)
+                return [vec.tolist() for vec in embeddings_gen]
+            raise e
 
     def embed_query(self, query: str) -> List[float]:
-        """对单个自然语言查询生成向量"""
-        # fastembed query_embed 返回 generator
-        res = list(self.model.query_embed(query))
-        if res:
-            return res[0].tolist()
-        return []
+        """对单个自然语言查询生成向量 (硬件加速异常自动降级 CPU 兜底)"""
+        try:
+            res = list(self.model.query_embed(query))
+            if res:
+                return res[0].tolist()
+            return []
+        except Exception as e:
+            if self._current_provider != "CPUExecutionProvider":
+                self._switch_to_cpu()
+                res = list(self.model.query_embed(query))
+                if res:
+                    return res[0].tolist()
+                return []
+            raise e

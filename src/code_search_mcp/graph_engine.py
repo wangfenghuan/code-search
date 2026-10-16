@@ -4,7 +4,7 @@ import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import lancedb
 
@@ -155,6 +155,15 @@ class CodeGraphEngine:
         except Exception:
             return False
 
+        arrow_tbl = tbl.to_arrow()
+        total_rows = arrow_tbl.num_rows
+        chunks = []
+        for i in range(total_rows):
+            chunks.append({col: arrow_tbl.column(col)[i].as_py() for col in arrow_tbl.schema.names})
+        return self.build_from_chunks(chunks)
+
+    def build_from_chunks(self, chunks: Sequence[Any]) -> bool:
+        """从内存中的 CodeChunk 列表直接构建 SQLite 图谱索引与解析边（预构建消除首次查询延迟）"""
         conn = self._get_db()
         self._init_sqlite_schema(conn)
 
@@ -163,33 +172,43 @@ class CodeGraphEngine:
         conn.execute("DELETE FROM calls;")
         conn.execute("DELETE FROM nodes;")
 
-        arrow_tbl = tbl.to_arrow()
         batch_size = 500
-        total_rows = arrow_tbl.num_rows
-
         nodes_to_insert = []
         calls_to_insert = []
 
-        for i in range(total_rows):
-            row = {col: arrow_tbl.column(col)[i].as_py() for col in arrow_tbl.schema.names}
-            node_id = str(row.get("id", ""))
-            file_path = str(row.get("file_path", ""))
-            sym_name = str(row.get("symbol_name", ""))
-            chunk_type = str(row.get("chunk_type", ""))
-            start_line = int(row.get("start_line", 1))
-            end_line = int(row.get("end_line", 1))
-            code = str(row.get("code", ""))
-            docstring = str(row.get("docstring", ""))
-            route_info = str(row.get("route_info", ""))
-            module_name = str(row.get("module_name", ""))
-            qualified_name = str(row.get("qualified_name", ""))
+        for c in chunks:
+            if isinstance(c, dict):
+                node_id = str(c.get("id", ""))
+                file_path = str(c.get("file_path", ""))
+                sym_name = str(c.get("symbol_name", ""))
+                chunk_type = str(c.get("chunk_type", ""))
+                start_line = int(c.get("start_line", 1))
+                end_line = int(c.get("end_line", 1))
+                code = str(c.get("code", ""))
+                docstring = str(c.get("docstring", "") or "")
+                route_info = str(c.get("route_info", "") or "")
+                module_name = str(c.get("module_name", "") or "")
+                qualified_name = str(c.get("qualified_name", "") or "")
+                calls_raw = c.get("calls", "[]")
+            else:
+                node_id = str(getattr(c, "id", f"{getattr(c, 'file_path', '')}:{getattr(c, 'start_line', 1)}:{getattr(c, 'symbol_name', '')}"))
+                file_path = str(getattr(c, "file_path", ""))
+                sym_name = str(getattr(c, "symbol_name", ""))
+                chunk_type = str(getattr(c, "chunk_type", ""))
+                start_line = int(getattr(c, "start_line", 1))
+                end_line = int(getattr(c, "end_line", 1))
+                code = str(getattr(c, "code", ""))
+                docstring = str(getattr(c, "docstring", "") or "")
+                route_info = str(getattr(c, "route_info", "") or "")
+                module_name = str(getattr(c, "module_name", "") or "")
+                qualified_name = str(getattr(c, "qualified_name", "") or "")
+                calls_raw = getattr(c, "calls", "[]")
 
             nodes_to_insert.append((
                 node_id, file_path, sym_name, chunk_type, start_line, end_line,
                 code, docstring, route_info, module_name, qualified_name
             ))
 
-            calls_raw = row.get("calls", "[]")
             try:
                 calls_list = json.loads(calls_raw) if isinstance(calls_raw, str) else list(calls_raw)
             except Exception:
