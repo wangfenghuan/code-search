@@ -366,9 +366,10 @@ class CodeGraphEngine:
                             res_type = "EXACT_QUALIFIED"
                             conf = 0.95
                         else:
-                            target_node = candidates[0]
-                            res_type = "AMBIGUOUS"
-                            conf = 0.5
+                            non_test = [c for c in candidates if "test" not in c["file_path"].lower()]
+                            target_node = non_test[0] if non_test else candidates[0]
+                            res_type = "EXACT_QUALIFIED"
+                            conf = 0.90
 
             if not target_node and c_qual:
                 c_tail = c_qual.split(".")[-1]
@@ -378,6 +379,35 @@ class CodeGraphEngine:
                         res_type = "EXACT_QUALIFIED"
                         conf = 0.95
                         break
+
+            # Rule 1.5: 跨包重导出与子模块限定匹配 (PACKAGE_EXPORT)
+            # 例如: 调用方 `from fastapi import Depends` -> c_qual = "fastapi.Depends"
+            # 定义位于: `fastapi/params.py` -> qk = "fastapi.params.Depends"
+            if not target_node and c_qual and "." in c_qual:
+                pkg_prefix = c_qual.split(".")[0]
+                leaf_name = c_qual.split(".")[-1]
+                pkg_cands = []
+                for qk, qnode in by_qual_tail.get(leaf_name, []):
+                    if qk.startswith(pkg_prefix + ".") and (qnode["chunk_type"] in ("function", "class", "method", "struct", "interface") or not qnode["chunk_type"]):
+                        pkg_cands.append(qnode)
+
+                if pkg_cands:
+                    non_test = [n for n in pkg_cands if "test" not in n["file_path"].lower()]
+                    valid_cands = non_test if non_test else pkg_cands
+                    if len(valid_cands) == 1:
+                        target_node = valid_cands[0]
+                        res_type = "PACKAGE_EXPORT"
+                        conf = 0.95
+                    else:
+                        same_dir = [n for n in valid_cands if Path(n["file_path"]).parent.as_posix() == caller_dir]
+                        if same_dir:
+                            target_node = same_dir[0]
+                            res_type = "PACKAGE_EXPORT"
+                            conf = 0.95
+                        else:
+                            target_node = valid_cands[0]
+                            res_type = "PACKAGE_EXPORT"
+                            conf = 0.90
 
             # Rule 2: 同文件内作用域匹配 (SAME_FILE)
             if not target_node and c_name:
@@ -401,11 +431,12 @@ class CodeGraphEngine:
                 if len(dir_cands) == 1:
                     target_node = dir_cands[0]
                     res_type = "SAME_DIR"
-                    conf = 0.9
+                    conf = 0.92
                 elif len(dir_cands) > 1:
-                    target_node = dir_cands[0]
-                    res_type = "AMBIGUOUS"
-                    conf = 0.4
+                    non_test = [n for n in dir_cands if "test" not in n["file_path"].lower()]
+                    target_node = non_test[0] if non_test else dir_cands[0]
+                    res_type = "SAME_DIR"
+                    conf = 0.88
 
             # Rule 4: 同模块命名空间就近匹配 (SAME_MODULE)
             if not target_node and c_name and caller_mod:
@@ -413,7 +444,12 @@ class CodeGraphEngine:
                 if len(mod_cands) == 1:
                     target_node = mod_cands[0]
                     res_type = "SAME_MODULE"
-                    conf = 0.85
+                    conf = 0.88
+                elif len(mod_cands) > 1:
+                    non_test = [n for n in mod_cands if "test" not in n["file_path"].lower()]
+                    target_node = non_test[0] if non_test else mod_cands[0]
+                    res_type = "SAME_MODULE"
+                    conf = 0.82
 
             # Rule 5: 动态调用推断 (DYNAMIC)
             if not target_node and is_dyn and c_name:
@@ -426,21 +462,46 @@ class CodeGraphEngine:
                     elif sd:
                         target_node = sd[0]
                     else:
-                        target_node = cands[0]
+                        non_test = [n for n in cands if "test" not in n["file_path"].lower()]
+                        target_node = non_test[0] if non_test else cands[0]
                     res_type = "DYNAMIC"
-                    conf = 0.7
+                    conf = 0.75
 
-            # Rule 6: 全局唯一符号匹配 (GLOBAL_UNIQUE vs AMBIGUOUS)
+            # Rule 6: 全局符号消歧匹配 (GLOBAL_UNIQUE vs AMBIGUOUS)
             if not target_node and c_name:
                 global_cands = by_sym.get(c_name, [])
                 if len(global_cands) == 1:
                     target_node = global_cands[0]
                     res_type = "GLOBAL_UNIQUE"
-                    conf = 0.8
+                    conf = 0.85
                 elif len(global_cands) > 1:
-                    target_node = global_cands[0]
-                    res_type = "AMBIGUOUS"
-                    conf = 0.3
+                    caller_is_test = "test" in caller_file.lower()
+                    non_test = [n for n in global_cands if "test" not in n["file_path"].lower()]
+                    cands_pool = global_cands if caller_is_test or not non_test else non_test
+
+                    def_cands = [n for n in cands_pool if n["chunk_type"] in ("function", "class", "method", "struct", "interface")]
+                    cands_pool = def_cands if def_cands else cands_pool
+
+                    if len(cands_pool) == 1:
+                        target_node = cands_pool[0]
+                        res_type = "GLOBAL_UNIQUE"
+                        conf = 0.82
+                    else:
+                        def _common_prefix_len(cand):
+                            p1 = Path(caller_file).parts
+                            p2 = Path(cand["file_path"]).parts
+                            common = 0
+                            for a, b in zip(p1, p2):
+                                if a == b:
+                                    common += 1
+                                else:
+                                    break
+                            return common
+
+                        cands_pool.sort(key=_common_prefix_len, reverse=True)
+                        target_node = cands_pool[0]
+                        res_type = "AMBIGUOUS"
+                        conf = 0.65
 
             # Rule 7: 外部依赖或标准库调用 (EXTERNAL)
             if not target_node:
@@ -686,11 +747,12 @@ class CodeGraphEngine:
                     e.resolution_type, e.confidence, e.callee_qualified
                 FROM resolved_edges e
                 JOIN nodes n ON e.caller_id = n.id
-                WHERE e.callee_id IN ({id_placeholders})
+                WHERE (e.callee_id IN ({id_placeholders}) OR e.callee_symbol = ? OR e.call_name = ?)
+                  AND e.confidence >= 0.25
                   AND e.resolution_type != 'EXTERNAL'
                 ORDER BY e.confidence DESC, n.file_path, n.start_line
             """
-            cursor = conn.execute(query_sql, target_node_ids)
+            cursor = conn.execute(query_sql, target_node_ids + [symbol_name, symbol_name])
             caller_rows = cursor.fetchall()
         else:
             query_sql = """
@@ -938,11 +1000,11 @@ class CodeGraphEngine:
                         n.route_info, e.is_dynamic, e.dynamic_expr, e.resolution_type, e.confidence
                     FROM resolved_edges e
                     JOIN nodes n ON e.caller_id = n.id
-                    WHERE e.callee_id IN ({id_ph})
-                      AND e.confidence >= 0.5
+                    WHERE (e.callee_id IN ({id_ph}) OR e.callee_symbol = ? OR e.call_name = ?)
+                      AND e.confidence >= 0.25
                       AND e.resolution_type != 'EXTERNAL'
                 """
-                cursor = conn.execute(query_sql, cur_ids)
+                cursor = conn.execute(query_sql, cur_ids + [curr_sym, curr_sym])
                 callers = cursor.fetchall()
             else:
                 query_sql = """
@@ -952,7 +1014,7 @@ class CodeGraphEngine:
                     FROM resolved_edges e
                     JOIN nodes n ON e.caller_id = n.id
                     WHERE (e.callee_symbol = ? OR e.callee_qualified = ? OR e.call_name = ?)
-                      AND e.confidence >= 0.5
+                      AND e.confidence >= 0.25
                       AND e.resolution_type != 'EXTERNAL'
                 """
                 cursor = conn.execute(query_sql, (curr_sym, curr_sym, curr_sym))
@@ -970,6 +1032,8 @@ class CodeGraphEngine:
                     "propagation_path": " -> ".join(path + [c['symbol_name']]),
                     "is_dynamic": bool(c['is_dynamic']),
                     "dynamic_expr": c['dynamic_expr'] or "",
+                    "resolution_type": c['resolution_type'],
+                    "confidence": float(c['confidence']),
                 }
                 impacted_tree.append(item)
 

@@ -689,10 +689,22 @@ class TreeSitterParser:
                 doc = get_leading_comment(outer_node, source)
                 route = self._extract_route_from_text(code_text)
 
+                # 检查是否为嵌套在其他函数内部的局部闭包函数 (Inner / Closure function)
+                curr = def_node.parent
+                is_inner_fn = False
+                enclosing_fn = None
+                while curr and curr.type != "class_definition":
+                    if curr.type in ("function_definition", "async_function_definition"):
+                        is_inner_fn = True
+                        n_node = curr.child_by_field_name("name")
+                        if n_node:
+                            enclosing_fn = get_node_text(n_node, source).strip()
+                        break
+                    curr = curr.parent
+
                 # 所属类判定：二分查找 O(log K) 替代全量 O(K) 线性扫描
                 # classes 在进入本循环前已按 start_byte 升序排列（由 tree-sitter 查询顺序保证）
                 parent_cls = None
-                # 用 bisect 找出所有 start <= s_byte 的类（候选集），再过滤 end >= e_byte
                 hi = bisect.bisect_right(cls_starts, s_byte)
                 best_span = None
                 for c in classes[:hi]:
@@ -701,6 +713,14 @@ class TreeSitterParser:
                         if best_span is None or span < best_span:
                             best_span = span
                             parent_cls = c["name"]
+
+                if is_inner_fn:
+                    prefix = f"{parent_cls}.{enclosing_fn}" if parent_cls and enclosing_fn else (enclosing_fn or parent_cls or "")
+                    full_name = f"{prefix}.<closure>.{fn_name}" if prefix else f"<closure>.{fn_name}"
+                    sym_type = "closure"
+                else:
+                    full_name = f"{parent_cls}.{fn_name}" if parent_cls else fn_name
+                    sym_type = "method" if parent_cls else "function"
 
                 # 签名提取
                 params_node = def_node.child_by_field_name("parameters")
@@ -712,12 +732,11 @@ class TreeSitterParser:
                 call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
                 fn_calls = self._extract_py_calls(call_matches, source, imports, module_name, parent_cls or "")
 
-                full_name = f"{parent_cls}.{fn_name}" if parent_cls else fn_name
                 qname = f"{module_name}.{full_name}" if module_name else full_name
                 symbols.append(
                     ParsedSymbol(
                         name=full_name,
-                        symbol_type="method" if parent_cls else "function",
+                        symbol_type=sym_type,
                         start_line=s_line,
                         end_line=e_line,
                         code=code_text,

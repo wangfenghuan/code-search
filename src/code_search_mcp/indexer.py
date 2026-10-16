@@ -22,6 +22,16 @@ from code_search_mcp.config import (
 from code_search_mcp.embeddings import EmbeddingEngine
 from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser, get_module_name_from_path
 from code_search_mcp.outline import ProjectOutlineGenerator
+def _create_fts_index_safe(table, field_name: str = "enriched_text"):
+    """安全创建全文检索 FTS 索引，优先使用 LanceDB 现代 FTS 配置 API，消除 DeprecatedWarning"""
+    try:
+        from lancedb.index import FTS
+        table.create_index(field_name, config=FTS(), replace=True)
+    except Exception:
+        try:
+            table.create_fts_index(field_name, replace=True)
+        except Exception:
+            pass
 
 
 @dataclass
@@ -398,10 +408,8 @@ class CodeIndexer:
         table_name = "code_chunks"
         sys.stderr.write(f"[code-search-mcp] 正在持久化至 LanceDB ({self.db_path})...\n")
         table = db.create_table(table_name, data=data, mode="overwrite")
-        try:
-            table.create_fts_index("enriched_text", replace=True)
-        except Exception:
-            pass
+        # 建立全文 FTS 索引 (消除 LanceDB 0.25+ 废弃警告)
+        _create_fts_index_safe(table, "enriched_text")
 
         # 记录元信息 (包含版本控制与模型参数)
         meta_file = self.db_path / "meta.json"
@@ -580,10 +588,8 @@ class CodeIndexer:
         db = lancedb.connect(str(self.db_path))
         tbl = db.open_table("code_chunks")
         tbl.add(data)
-        try:
-            tbl.create_fts_index("enriched_text", replace=True)
-        except Exception:
-            pass
+        # 增量刷新全文 FTS 索引 (消除 LanceDB 废弃警告)
+        _create_fts_index_safe(tbl, "enriched_text")
         self._sync_meta_stats(tbl)
 
         # 4. 刷新大纲缓存与图引擎缓存

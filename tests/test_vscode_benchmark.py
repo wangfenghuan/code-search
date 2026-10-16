@@ -276,5 +276,18 @@ def main():
     print(f"\n📄 基准测试详细数据已写入: {report_file}")
 
 
+def test_vscode_benchmark():
+    """Pytest 自动化收集与基准执行入口"""
+    vscode_editor = ROOT_DIR / "tests" / "benchmark_repos" / "vscode" / "src" / "vs" / "editor"
+    if not vscode_editor.exists():
+        try:
+            import pytest
+            pytest.skip(f"未检测到 VS Code 基准仓库 ({vscode_editor})，已跳过")
+        except ImportError:
+            print(f"⏭️ 未检测到 VS Code 基准仓库 ({vscode_editor})，已跳过")
+            return
+    main()
+
+
 if __name__ == "__main__":
     main()

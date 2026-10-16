@@ -349,5 +349,19 @@ def main():
     print(f"\n📄 基准测试详细数据已写入: {report_path}\n")
 
 
+def test_django_benchmark():
+    """Pytest 自动化收集与基准执行入口"""
+    django_repo = ROOT_DIR / "tests" / "benchmark_repos" / "django"
+    django_core = django_repo / "django"
+    if not django_core.exists():
+        try:
+            import pytest
+            pytest.skip(f"未检测到 Django 基准仓库 ({django_core})，已跳过")
+        except ImportError:
+            print(f"⏭️ 未检测到 Django 基准仓库 ({django_core})，已跳过")
+            return
+    main()
+
+
 if __name__ == "__main__":
     main()

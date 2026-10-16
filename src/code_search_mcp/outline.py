@@ -59,8 +59,19 @@ class ProjectOutlineGenerator:
                             "summary": "",
                             "methods": [],
                         }
-                    classes_map[cls_name]["methods"].append(m_name)
+                    if m_name not in classes_map[cls_name]["methods"]:
+                        classes_map[cls_name]["methods"].append(m_name)
                 else:
+                    if not any(f["name"] == sym.name for f in functions):
+                        functions.append(
+                            {
+                                "name": sym.name,
+                                "summary": sym.docstring.split("\n")[0].strip() if sym.docstring else "",
+                                "route": sym.route_info,
+                            }
+                        )
+            elif sym.symbol_type == "function":
+                if not any(f["name"] == sym.name for f in functions):
                     functions.append(
                         {
                             "name": sym.name,
@@ -68,14 +79,6 @@ class ProjectOutlineGenerator:
                             "route": sym.route_info,
                         }
                     )
-            elif sym.symbol_type == "function":
-                functions.append(
-                    {
-                        "name": sym.name,
-                        "summary": sym.docstring.split("\n")[0].strip() if sym.docstring else "",
-                        "route": sym.route_info,
-                    }
-                )
 
         return {
             "rel_path": rel_path,
