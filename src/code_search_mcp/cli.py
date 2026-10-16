@@ -1,12 +1,25 @@
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
-from code_search_mcp.ripgrep_engine import ExactSearchEngine, format_exact_results
-from code_search_mcp.searcher import CodeSearcher, format_search_results, resolve_repo_path
+from code_search_mcp.ripgrep_engine import ExactSearchEngine
+from code_search_mcp.searcher import CodeSearcher, resolve_repo_path
 from code_search_mcp.server import run_server
+from code_search_mcp.ui import (
+    console,
+    print_banner,
+    print_cache_table,
+    print_clean_result,
+    print_error,
+    print_exact_results,
+    print_index_result,
+    print_markdown,
+    print_search_results,
+    print_watch_banner,
+)
 
 # 确保在 Windows 控制台环境下正常输出 UTF-8
 if sys.platform == "win32":
@@ -19,7 +32,30 @@ if sys.platform == "win32":
 
 def main():
     parser = argparse.ArgumentParser(
-        description="code-search-mcp: 本地轻量代码语义搜索 MCP 服务与 CLI 工具"
+        prog="code-search-mcp",
+        description="""
+  ___          _        ___                       _      
+ / __|___  __| |___   / __| ___ __ _ _ _ __ |_ |__   
+| (__/ _ \/ _` / -_)  \__ \/ -_) _` | '_/ _| ' \  / -_) 
+ \___\___/\__,_\___|  |___/\___\__,_|_| \__|_||_| \___|  ⚡ MCP
+
+⚡ 本地轻量代码语义搜索与图谱分析引擎 (AST + Vector + BM25 + Ripgrep)
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+常用命令示例 (Examples):
+  code-search-mcp index .                           # 扫描并为当前代码库构建语义与 AST 索引
+  code-search-mcp search "用户登录认证与密码校验"   # 语义混合检索 (高亮语法代码块)
+  code-search-mcp exact "hash_password"             # 使用 ripgrep 极速精准字面量/正则查找
+  code-search-mcp outline                           # 生成多语言全局架构骨架大纲 (极省 Token)
+  code-search-mcp explore "用户注册与鉴权流程"      # 一键全链路业务手术级探索 (CodeGraph 风格)
+  code-search-mcp callers "verify_token"            # 查询谁调用了指定函数或类
+  code-search-mcp callees "AuthService.login"       # 查询指定函数直接依赖调用的下游符号
+  code-search-mcp impact "User" --depth 3           # 改动爆炸半径分析 (跨文件反向传递)
+  code-search-mcp cache                             # 查看全局索引缓存清单与磁盘占用
+  code-search-mcp clean --orphaned                  # 一键安全清理孤儿幽灵缓存释放空间
+  code-search-mcp install                           # 一键向导式配置 Claude/Cursor/Windsurf MCP
+        """,
     )
     subparsers = parser.add_subparsers(dest="command", help="子命令")
 
@@ -149,114 +185,131 @@ def main():
 
     args = parser.parse_args()
 
-    # 如果无参数，默认以 MCP stdio 运行服务
-    if args.command is None or args.command == "serve":
+    # 如果无参数
+    if args.command is None:
+        # 如果是在交互式控制台直接运行，展示美化 Banner 与命令引导
+        if sys.stdin.isatty():
+            print_banner()
+            parser.print_help()
+            return
+        else:
+            # 否则作为 MCP stdio 协议运行服务
+            run_server()
+            return
+
+    if args.command == "serve":
         run_server()
         return
 
     if args.command == "index":
         target = Path(args.path).resolve()
         if not target.exists() or not target.is_dir():
-            print(f"错误: 目标路径 '{target}' 不存在或非目录", file=sys.stderr)
+            print_error(f"目标路径 '{target}' 不存在或非目录")
             sys.exit(1)
         indexer = CodeIndexer(target)
-        res = indexer.index_all()
-        print(f"✅ 索引成功！代码库: {res['repo_path']}")
-        print(f"   扫描文件: {res['indexed_files']} 个 | 切片代码块: {res['indexed_chunks']} 个")
+        t0 = time.perf_counter()
+        with console.status(f"[bold cyan]正在解析代码库并构建向量与 AST 索引 ({target.name})...[/bold cyan]", spinner="dots"):
+            res = indexer.index_all()
+        elapsed = time.perf_counter() - t0
+        print_index_result(res, elapsed_seconds=elapsed)
 
     elif args.command == "outline":
         target = resolve_repo_path(args.path)
         if not target or not target.exists():
-            print("错误: 未找到目标代码库", file=sys.stderr)
+            print_error("未找到目标代码库")
             sys.exit(1)
-        gen = ProjectOutlineGenerator(target)
-        outline_data = gen.get_cached_or_generate()
-        print(gen.format_as_markdown(outline_data))
+        with console.status("[bold cyan]正在提取代码库全局架构骨架地图...[/bold cyan]", spinner="dots"):
+            gen = ProjectOutlineGenerator(target)
+            outline_data = gen.get_cached_or_generate()
+        print_markdown(gen.format_as_markdown(outline_data))
 
     elif args.command == "search":
         target = resolve_repo_path(args.path)
         if not target or not target.exists():
-            print("错误: 未找到目标代码库，请先执行 index 命令", file=sys.stderr)
+            print_error("未找到目标代码库，请先执行 index 命令")
             sys.exit(1)
         searcher = CodeSearcher(target)
         if not searcher.is_indexed():
-            print(f"提示: 代码库 '{target}' 尚未建立索引，正在为您自动建立初始索引...", file=sys.stderr)
+            console.print(f"[yellow]提示: 代码库 '{target}' 尚未建立索引，正在为您自动建立初始索引...[/yellow]")
             indexer = CodeIndexer(target)
             indexer.index_all()
 
-        results = searcher.search(args.query, top_k=args.top_k)
-        print(format_search_results(results, args.query, compact=not args.full))
+        with console.status("[bold cyan]正在执行混合多路召回检索 (RRF + Vector + BM25)...[/bold cyan]", spinner="dots"):
+            results = searcher.search(args.query, top_k=args.top_k)
+        print_search_results(results, args.query, target, compact=not args.full)
 
     elif args.command == "exact":
         target = resolve_repo_path(args.path)
         if not target or not target.exists():
-            print("错误: 未找到目标代码库", file=sys.stderr)
+            print_error("未找到目标代码库")
             sys.exit(1)
         engine = ExactSearchEngine(target)
-        res = engine.search(
-            pattern=args.pattern,
-            is_regex=args.regex,
-            case_sensitive=args.case_sensitive,
-            file_glob=args.glob,
-            max_results=args.max,
-        )
-        print(format_exact_results(res))
+        with console.status(f"[bold magenta]正在调用 Ripgrep 极速检索: {args.pattern}...[/bold magenta]", spinner="dots"):
+            res = engine.search(
+                pattern=args.pattern,
+                is_regex=args.regex,
+                case_sensitive=args.case_sensitive,
+                file_glob=args.glob,
+                max_results=args.max,
+            )
+        print_exact_results(res)
 
     elif args.command == "explore":
         from code_search_mcp.graph_engine import CodeGraphEngine
         target = resolve_repo_path(args.path)
         if not target or not target.exists():
-            print("错误: 未找到目标代码库", file=sys.stderr)
+            print_error("未找到目标代码库")
             sys.exit(1)
         engine = CodeGraphEngine(target)
-        res = engine.explore_feature(args.query, top_k=args.top_k)
+        with console.status(f"[bold cyan]正在执行业务全链路拓扑分析: {args.query}...[/bold cyan]", spinner="dots"):
+            res = engine.explore_feature(args.query, top_k=args.top_k)
         if res.get("status") == "success":
-            print(res.get("surgical_context_markdown", ""))
+            print_markdown(res.get("surgical_context_markdown", ""))
         else:
-            print(res.get("message", "探索失败"))
+            print_error(res.get("message", "探索失败"))
 
     elif args.command == "callers":
         from code_search_mcp.graph_engine import CodeGraphEngine, format_callers_markdown
         target = resolve_repo_path(args.path)
         if not target or not target.exists():
-            print("错误: 未找到目标代码库", file=sys.stderr)
+            print_error("未找到目标代码库")
             sys.exit(1)
         engine = CodeGraphEngine(target)
-        res = engine.get_callers(args.symbol)
-        print(format_callers_markdown(res))
+        with console.status(f"[bold cyan]正在追踪 '{args.symbol}' 的上游调用方...[/bold cyan]", spinner="dots"):
+            res = engine.get_callers(args.symbol)
+        print_markdown(format_callers_markdown(res))
 
     elif args.command == "callees":
         from code_search_mcp.graph_engine import CodeGraphEngine, format_callees_markdown
         target = resolve_repo_path(args.path)
         if not target or not target.exists():
-            print("错误: 未找到目标代码库", file=sys.stderr)
+            print_error("未找到目标代码库")
             sys.exit(1)
         engine = CodeGraphEngine(target)
-        res = engine.get_callees(args.symbol)
-        print(format_callees_markdown(res))
+        with console.status(f"[bold cyan]正在追踪 '{args.symbol}' 的下游依赖调用...[/bold cyan]", spinner="dots"):
+            res = engine.get_callees(args.symbol)
+        print_markdown(format_callees_markdown(res))
 
     elif args.command == "impact":
         from code_search_mcp.graph_engine import CodeGraphEngine, format_impact_markdown
         target = resolve_repo_path(args.path)
         if not target or not target.exists():
-            print("错误: 未找到目标代码库", file=sys.stderr)
+            print_error("未找到目标代码库")
             sys.exit(1)
         engine = CodeGraphEngine(target)
-        res = engine.get_impact_radius(args.symbol, max_depth=args.depth)
-        print(format_impact_markdown(res))
+        with console.status(f"[bold cyan]正在计算 '{args.symbol}' 的改动爆炸半径...[/bold cyan]", spinner="dots"):
+            res = engine.get_impact_radius(args.symbol, max_depth=args.depth)
+        print_markdown(format_impact_markdown(res))
 
     elif args.command == "watch":
-        import time
         from code_search_mcp.watcher import RepoWatcher
 
         target = resolve_repo_path(args.path)
         if not target or not target.exists():
-            print("错误: 未找到目标代码库", file=sys.stderr)
+            print_error("未找到目标代码库")
             sys.exit(1)
 
-        print(f"📡 启动代码库实时热监控: {target}")
-        print(f"   防抖延迟: {args.debounce}ms | 监控语言: Python, TypeScript, JavaScript, Go")
-        print("   正在监听文件变动 (按 Ctrl+C 退出监控)...\n")
+        print_watch_banner(target, args.debounce)
 
         watcher = RepoWatcher(target, debounce_ms=args.debounce)
         watcher.start()
@@ -265,7 +318,7 @@ def main():
                 time.sleep(0.5)
         except KeyboardInterrupt:
             watcher.stop()
-            print("\n👋 已安全停止监控")
+            console.print("\n[bold yellow]👋 已安全停止监控[/bold yellow]\n")
 
     elif args.command == "install":
         from code_search_mcp.installer import run_installer
@@ -303,25 +356,7 @@ def main():
             print(json.dumps({"summary": summary, "entries": entries}, ensure_ascii=False, indent=2))
         else:
             entries = mgr.list_entries()
-            print("\n" + "=" * 70)
-            print(f"📦 code-search-mcp 全局索引缓存清单 (存储根目录: {summary['cache_root']})")
-            print("=" * 70)
-            if not entries:
-                print("   暂无任何索引缓存记录。")
-            else:
-                for i, e in enumerate(entries, 1):
-                    status_tag = "✅ 有效" if e.repo_exists else "⚠️  孤儿(源码已失效)"
-                    up_str = datetime.fromtimestamp(e.last_updated).strftime("%Y-%m-%d %H:%M") if e.last_updated else "未知"
-                    r_path = e.repo_path or f"<哈希: {e.hash_id}>"
-                    print(f"[{i:2d}] {status_tag} | 占用: {e.size_mb:>6.2f} MB | 切片: {e.indexed_chunks} 块 ({e.indexed_files} 文件) | 更新: {up_str}")
-                    print(f"     源码路径: {r_path}")
-
-            print("-" * 70)
-            print(f"📊 汇总: 共 {summary['total_entries']} 个项目缓存 | 总占用: {summary['total_size_mb']:.2f} MB")
-            if summary['orphaned_entries'] > 0:
-                print(f"💡 发现 {summary['orphaned_entries']} 个已删除项目的孤儿幽灵缓存 ({summary['orphaned_size_mb']:.2f} MB)")
-                print(f"   运行 `code-search-mcp clean --orphaned` 可一键清理释放空间。")
-            print("=" * 70 + "\n")
+            print_cache_table(summary, entries)
 
     elif args.command == "clean":
         from code_search_mcp.cache_manager import CacheManager
@@ -336,16 +371,7 @@ def main():
             target_repo=args.path if args.path else None,
             dry_run=args.dry_run,
         )
-
-        prefix = "🔍 [模拟预览]" if res["dry_run"] else "🧹 [已清理]"
-        print(f"\n{prefix} 匹配到 {res['matched_entries']} 个缓存项目，释放磁盘空间: {res['freed_mb']:.2f} MB")
-        for item in res["deleted_items"]:
-            print(f"   • {item['hash']}: {item['repo_path']} ({item['size_mb']} MB)")
-
-        if res["dry_run"]:
-            print("\n💡 以上为模拟结果。去掉 --dry-run 即可真正执行清理。")
-        else:
-            print(f"\n✅ 清理完成！成功释放 {res['freed_mb']:.2f} MB 空间。\n")
+        print_clean_result(res)
 
 
 if __name__ == "__main__":
