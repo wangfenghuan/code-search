@@ -17,6 +17,7 @@ from code_search_mcp.config import (
     INDEX_SCHEMA_VERSION,
     VECTOR_DIMENSION,
     get_repo_db_path,
+    get_vector_dimension,
 )
 from code_search_mcp.embeddings import EmbeddingEngine
 from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser, get_module_name_from_path
@@ -407,7 +408,7 @@ class CodeIndexer:
         meta = {
             "schema_version": INDEX_SCHEMA_VERSION,
             "model_name": self.embedding_engine.model_name,
-            "vector_dimension": VECTOR_DIMENSION,
+            "vector_dimension": get_vector_dimension(self.embedding_engine.model_name),
             "repo_path": str(self.repo_path),
             "indexed_files": len(files),
             "indexed_chunks": total_chunks,

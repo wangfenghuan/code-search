@@ -9,8 +9,31 @@ MODEL_DIMENSIONS = {
     "BAAI/bge-small-en-v1.5": 384,
     "sentence-transformers/all-MiniLM-L6-v2": 384,
     "nomic-ai/nomic-embed-code": 768,
+    "nomic-ai/nomic-embed-text-v1.5": 768,
+    "nomic-ai/nomic-embed-text-v1.5-Q": 768,
+    "jinaai/jina-embeddings-v2-base-code": 768,
+    "jinaai/jina-embeddings-v2-base-zh": 768,
+    "ibm-granite/granite-embedding-small-english-r2": 384,
 }
-VECTOR_DIMENSION = MODEL_DIMENSIONS.get(DEFAULT_MODEL_NAME, 512)
+
+
+def get_vector_dimension(model_name: str = DEFAULT_MODEL_NAME) -> int:
+    """获取或动态解析指定模型的向量维度"""
+    if model_name in MODEL_DIMENSIONS:
+        return MODEL_DIMENSIONS[model_name]
+    try:
+        from fastembed import TextEmbedding
+        for m in TextEmbedding.list_supported_models():
+            if m.get("model") == model_name:
+                dim = int(m.get("dim", 512))
+                MODEL_DIMENSIONS[model_name] = dim
+                return dim
+    except Exception:
+        pass
+    return 512
+
+
+VECTOR_DIMENSION = get_vector_dimension(DEFAULT_MODEL_NAME)
 DEFAULT_TOP_K = 5
 INDEX_SCHEMA_VERSION = "v2"
 
