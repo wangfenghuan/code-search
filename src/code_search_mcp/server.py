@@ -248,7 +248,7 @@ def explore_codebase(query: str, path: str = "", top_k: int = 2) -> str:
 
 
 @mcp.tool()
-def get_symbol_callers(symbol_name: str, path: str = "") -> str:
+def get_symbol_callers(symbol_name: str, path: str = "", limit: int = 30, offset: int = 0) -> str:
     """查询代码库中谁调用了该函数或类（Call Graph 上游调用关系追踪）。
     返回所有调用方符号、所在文件、行号、触发路由及代码预览。
 
@@ -273,7 +273,7 @@ def get_symbol_callers(symbol_name: str, path: str = "") -> str:
 
 
 @mcp.tool()
-def get_symbol_callees(symbol_name: str, path: str = "") -> str:
+def get_symbol_callees(symbol_name: str, path: str = "", limit: int = 50, offset: int = 0) -> str:
     """查询指定函数或方法内部直接调用的下游模块与函数列表（Call Graph 下游依赖追踪）。
     标明调用的符号是否在仓库内定义及其所在文件与功能说明。
 

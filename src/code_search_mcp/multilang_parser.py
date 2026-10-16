@@ -688,12 +688,19 @@ class TreeSitterParser:
                 doc = get_leading_comment(outer_node, source)
                 route = self._extract_route_from_text(code_text)
 
-                # 所属类判定 (区间包含)
+                # 所属类判定：二分查找 O(log K) 替代全量 O(K) 线性扫描
+                # classes 在进入本循环前已按 start_byte 升序排列（由 tree-sitter 查询顺序保证）
                 parent_cls = None
-                enclosing = [c for c in classes if c["start"] <= s_byte and e_byte <= c["end"]]
-                if enclosing:
-                    enclosing.sort(key=lambda c: c["end"] - c["start"])
-                    parent_cls = enclosing[0]["name"]
+                # 用 bisect 找出所有 start <= s_byte 的类（候选集），再过滤 end >= e_byte
+                cls_starts = [c["start"] for c in classes]
+                hi = bisect.bisect_right(cls_starts, s_byte)
+                best_span = None
+                for c in classes[:hi]:
+                    if c["end"] >= e_byte:
+                        span = c["end"] - c["start"]
+                        if best_span is None or span < best_span:
+                            best_span = span
+                            parent_cls = c["name"]
 
                 # 签名提取
                 params_node = def_node.child_by_field_name("parameters")

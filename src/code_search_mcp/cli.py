@@ -125,6 +125,13 @@ def main():
     watch_parser.add_argument("path", nargs="?", default="", help="代码库根目录路径（默认当前或最近索引项目）")
     watch_parser.add_argument("--debounce", "-d", type=int, default=1500, help="防抖延迟毫秒数（默认 1500ms）")
 
+    # install 子命令 (一键全自动配置 Claude Desktop / Claude Code / Cursor / Windsurf / Cline)
+    install_parser = subparsers.add_parser("install", help="一键全自动安装并配置 Claude/Cursor/Windsurf/Cline MCP 与规范")
+    install_parser.add_argument("--clients", "-c", default="all", help="要配置的目标客户端（如 claude-code,cursor 或 all，默认 all）")
+    install_parser.add_argument("--mode", "-m", choices=["auto", "uvx", "uv", "python", "docker"], default="auto", help="MCP 启动运行模式（默认 auto 自动检测）")
+    install_parser.add_argument("--repo", "-r", default="", help="目标代码库根目录路径（用于初始化规则，默认当前目录）")
+    install_parser.add_argument("--no-rules", action="store_true", help="跳过自动写入 CLAUDE.md 与 .cursorrules 规范")
+
     # serve 子命令（默认或作为 MCP 启动）
     serve_parser = subparsers.add_parser("serve", help="以 MCP stdio 协议启动服务")
 
@@ -247,6 +254,18 @@ def main():
         except KeyboardInterrupt:
             watcher.stop()
             print("\n👋 已安全停止监控")
+
+    elif args.command == "install":
+        from code_search_mcp.installer import run_installer
+
+        target = Path(args.repo).resolve() if args.repo else Path.cwd().resolve()
+        client_list = [c.strip().lower() for c in args.clients.split(",")] if args.clients != "all" else None
+        run_installer(
+            clients=client_list,
+            mode=args.mode,
+            target_repo=target,
+            write_rules=not args.no_rules,
+        )
 
 
 if __name__ == "__main__":

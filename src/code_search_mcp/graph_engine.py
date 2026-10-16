@@ -137,6 +137,13 @@ class CodeGraphEngine:
             CREATE INDEX IF NOT EXISTS idx_resolved_caller_file ON resolved_edges(caller_file);
             CREATE INDEX IF NOT EXISTS idx_resolved_callee_file ON resolved_edges(callee_file);
             CREATE INDEX IF NOT EXISTS idx_resolved_call_name ON resolved_edges(call_name);
+
+            -- 复合覆盖索引：get_callers BFS 最常见访问模式 (callee_id IN (...) ORDER BY confidence DESC)
+            CREATE INDEX IF NOT EXISTS idx_resolved_callee_id_conf
+                ON resolved_edges(callee_id, confidence DESC, resolution_type, caller_id);
+            -- 复合覆盖索引：get_callees BFS 最常见访问模式 (caller_id = ? ORDER BY confidence DESC)
+            CREATE INDEX IF NOT EXISTS idx_resolved_caller_id_conf
+                ON resolved_edges(caller_id, confidence DESC, resolution_type, callee_id);
         """)
         conn.commit()
 
@@ -622,8 +629,14 @@ class CodeGraphEngine:
         cand_strs = [f"{n.qualified_name or n.symbol_name} ({n.file_path}#L{n.start_line})" for n in candidates]
         return candidates[0], True, cand_strs
 
-    def get_callers(self, symbol_name: str) -> Dict[str, Any]:
-        """查询调用了指定符号的所有上游调用方 (Who calls X)"""
+    def get_callers(self, symbol_name: str, limit: int = 30, offset: int = 0) -> Dict[str, Any]:
+        """查询调用了指定符号的所有上游调用方 (Who calls X)
+        
+        Args:
+            symbol_name: 目标符号名（支持限定名如 module.ClassName.method）
+            limit: 最多返回条数，默认 30，设为 0 表示不限制
+            offset: 分页偏移量，默认 0
+        """
         if not self.load():
             return {
                 "status": "error",
@@ -723,17 +736,31 @@ class CodeGraphEngine:
                     }
                 )
 
+        total_count = len(matched_callers)
+        if limit > 0:
+            paged_callers = matched_callers[offset: offset + limit]
+        else:
+            paged_callers = matched_callers[offset:] if offset else matched_callers
+
         return {
             "status": "success",
             "target_symbol": symbol_name,
             "defined_in_repo": is_defined_in_repo,
             "ambiguous_definitions": ambig_defs,
-            "callers_count": len(matched_callers),
-            "callers": matched_callers,
+            "total_count": total_count,
+            "callers_count": len(paged_callers),
+            "has_more": (offset + len(paged_callers)) < total_count,
+            "callers": paged_callers,
         }
 
-    def get_callees(self, symbol_name: str) -> Dict[str, Any]:
-        """查询指定符号直接调用的下游函数与模块 (What X calls)"""
+    def get_callees(self, symbol_name: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """查询指定符号直接调用的下游函数与模块 (What X calls)
+        
+        Args:
+            symbol_name: 目标符号名（支持限定名）
+            limit: 最多返回条数，默认 50，设为 0 表示不限制
+            offset: 分页偏移量，默认 0
+        """
         if not self.load():
             return {
                 "status": "error",
@@ -844,11 +871,19 @@ class CodeGraphEngine:
                     }
                 )
 
+        total_count = len(callees_detail)
+        if limit > 0:
+            paged_callees = callees_detail[offset: offset + limit]
+        else:
+            paged_callees = callees_detail[offset:] if offset else callees_detail
+
         return {
             "status": "success",
             "target_symbol": symbol_name,
-            "callees_count": len(callees_detail),
-            "callees": callees_detail,
+            "total_count": total_count,
+            "callees_count": len(paged_callees),
+            "has_more": (offset + len(paged_callees)) < total_count,
+            "callees": paged_callees,
         }
 
     def get_impact_radius(self, symbol_name: str, max_depth: int = 3) -> Dict[str, Any]:
@@ -964,7 +999,11 @@ class CodeGraphEngine:
         }
 
     def build_call_tree(self, root_sym: str, max_depth: int = 3) -> Dict[str, Any]:
-        """对指定根节点进行 BFS 下游展开，生成调用树与链路节点 (Fix #9)"""
+        """对指定根节点进行 BFS 下游展开，生成调用树与链路节点 (Fix #9)
+        
+        优化：批量 BFS (Batched Frontier SQL) — 每层只发起一次 SQL 查询，
+        而非对每个节点分别调用 get_callees()，将 DB 往返从 O(N×depth) 降至 O(depth)。
+        """
         tree_node: Dict[str, Any] = {
             "symbol": root_sym,
             "defined_in_repo": True,
@@ -975,44 +1014,105 @@ class CodeGraphEngine:
         }
         conn = self._get_db()
         cursor = conn.execute(
-            "SELECT file_path, start_line, docstring FROM nodes WHERE symbol_name = ? OR qualified_name = ? LIMIT 1",
+            "SELECT id, file_path, start_line, docstring FROM nodes WHERE symbol_name = ? OR qualified_name = ? LIMIT 1",
             (root_sym, root_sym),
         )
         row = cursor.fetchone()
+        root_id: Optional[str] = None
         if row:
             tree_node["file_path"] = row['file_path']
             tree_node["line"] = row['start_line']
             tree_node["docstring"] = row['docstring']
+            root_id = row['id']
 
-        visited = {root_sym}
-        queue = deque([(tree_node, root_sym, 1)])
+        # BFS 状态：{symbol_name: tree_node_dict}，用于快速追加子节点
+        visited: Set[str] = {root_sym}
+        # 当前层的 frontier：(tree_node, symbol_name, node_id_or_None)
+        frontier = [(tree_node, root_sym, root_id)]
 
-        while queue:
-            curr_item, curr_sym, depth = queue.popleft()
-            if depth > max_depth:
-                continue
+        for depth in range(1, max_depth + 1):
+            if not frontier:
+                break
 
-            callees_data = self.get_callees(curr_sym)
-            callees = callees_data.get("callees", [])
-            for c in callees:
-                c_sym = c["target_symbol"]
-                in_repo = c.get("defined_in_repo", False)
+            # 收集本层所有 caller_id（已知）与 caller_symbol（回退）
+            ids_in_frontier: List[str] = [nid for (_, _, nid) in frontier if nid]
+            syms_in_frontier: List[str] = [sym for (_, sym, nid) in frontier if not nid]
+
+            # 构建批量 SQL：一次性取出本层所有节点的下游 callee 边
+            edge_rows: List[Any] = []
+            if ids_in_frontier:
+                ph = ",".join("?" for _ in ids_in_frontier)
+                edge_rows += conn.execute(f"""
+                    SELECT DISTINCT
+                        e.caller_id,
+                        e.callee_id, e.callee_symbol, e.callee_qualified, e.callee_file,
+                        e.call_name, e.resolution_type, e.confidence, e.is_dynamic, e.dynamic_expr,
+                        n.chunk_type, n.start_line, n.docstring
+                    FROM resolved_edges e
+                    LEFT JOIN nodes n ON e.callee_id = n.id
+                    WHERE e.caller_id IN ({ph})
+                    ORDER BY e.confidence DESC
+                """, ids_in_frontier).fetchall()
+
+            if syms_in_frontier:
+                ph = ",".join("?" for _ in syms_in_frontier)
+                edge_rows += conn.execute(f"""
+                    SELECT DISTINCT
+                        e.caller_id,
+                        e.callee_id, e.callee_symbol, e.callee_qualified, e.callee_file,
+                        e.call_name, e.resolution_type, e.confidence, e.is_dynamic, e.dynamic_expr,
+                        n.chunk_type, n.start_line, n.docstring
+                    FROM resolved_edges e
+                    LEFT JOIN nodes n ON e.callee_id = n.id
+                    WHERE e.caller_symbol IN ({ph})
+                    ORDER BY e.confidence DESC
+                """, syms_in_frontier).fetchall()
+
+            # 按 caller_id 分组边，映射到对应的父节点
+            caller_id_to_tree: Dict[str, Any] = {nid: tn for (tn, _, nid) in frontier if nid}
+            caller_sym_to_tree: Dict[str, Any] = {sym: tn for (tn, sym, nid) in frontier if not nid}
+
+            next_frontier = []
+            seen_per_parent: Dict[str, Set[str]] = {}  # caller_id -> 已插入 callee_name 集合
+
+            for erow in edge_rows:
+                parent_id = erow['caller_id']
+                parent_node = caller_id_to_tree.get(parent_id) or caller_sym_to_tree.get(erow['caller_id'] or '')
+                if parent_node is None:
+                    continue  # 无法匹配父节点，跳过
+
+                c_name = erow['call_name'] or erow['callee_symbol'] or ''
+                if not c_name:
+                    continue
+
+                pkey = parent_id or id(parent_node)
+                if pkey not in seen_per_parent:
+                    seen_per_parent[pkey] = set()
+                if c_name in seen_per_parent[pkey]:
+                    continue
+                seen_per_parent[pkey].add(c_name)
+
+                in_repo = (erow['callee_id'] is not None and erow['resolution_type'] != 'EXTERNAL')
                 child_item = {
-                    "symbol": c_sym,
+                    "symbol": c_name,
                     "defined_in_repo": in_repo,
-                    "file_path": c.get("file_path"),
-                    "line": c.get("start_line"),
-                    "docstring": c.get("docstring", ""),
+                    "file_path": erow['callee_file'],
+                    "line": erow['start_line'],
+                    "docstring": erow['docstring'] or "",
                     "children": [],
-                    "is_dynamic": c.get("is_dynamic", False),
-                    "dynamic_expr": c.get("dynamic_expr", ""),
+                    "is_dynamic": bool(erow['is_dynamic']),
+                    "dynamic_expr": erow['dynamic_expr'] or "",
                 }
-                curr_item["children"].append(child_item)
-                if in_repo and c_sym not in visited and depth < max_depth:
-                    visited.add(c_sym)
-                    queue.append((child_item, c_sym, depth + 1))
+                parent_node["children"].append(child_item)
+
+                if in_repo and c_name not in visited and depth < max_depth:
+                    visited.add(c_name)
+                    next_frontier.append((child_item, c_name, erow['callee_id']))
+
+            frontier = next_frontier
 
         return tree_node
+
 
     def format_tree_ascii(self, node: Dict[str, Any], prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
         """将调用树格式化为目录树 ASCII 字符串列表 (Fix #11)"""

@@ -64,83 +64,65 @@
 
 ---
 
-## 🛠️ 快速安装与运行方式
+## ⚡ 一键极速上手（一条命令自动配置）
 
-### 方式 A: 本地极速运行（推荐）
+无需手动找路径、无需手动手写修改 JSON 配置文件，支持全自动跨客户端配置与最佳实践规范注入：
 
-本项目使用现代极速包管理工具 [uv](https://github.com/astral-sh/uv)：
-
+### 方式 1: `uvx` 免安装一键搞定（最推荐，开箱即用）
 ```bash
-# 克隆代码
+# 自动探测系统内所有 AI 客户端并完成 MCP 挂载与规则初始化
+uvx code-search-mcp install
+```
+
+### 方式 2: 本地克隆一键安装
+```bash
 git clone https://github.com/wangfenghuan/code-search.git
 cd code-search
-
-# 安装依赖（一键同步 ONNX Runtime, LanceDB 与 Tree-sitter 语法包）
-uv sync
+python install.py
+# 或使用 uv:
+uv run code-search-mcp install
 ```
 
-### 方式 B: Docker 容器化运行（零环境依赖，开箱即用）
-
-无需在宿主机安装 Python、Rust 或 Tree-sitter，镜像内部已预热构建了中文向量模型权重与 ripgrep：
-
-```bash
-# 构建镜像（预置模型权重，毫秒级冷启动）
-docker build -t code-search-mcp:latest .
-
-# 使用一键启动脚本快速运行：
-# Linux / macOS:
-./scripts/docker-run.sh /path/to/project
-
-# Windows (PowerShell):
-.\scripts\docker-run.ps1 -TargetDir D:\my-project
-```
-
-> 📖 详细 Docker 命令与参数请参阅 [Docker 完整部署指南 (DOCKER_GUIDE.md)](DOCKER_GUIDE.md)。
+> **自动化完成全部流程**：
+> - ✅ 自动识别并合并写入 **Claude Code** (`~/.claude.json`)
+> - ✅ 自动识别并合并写入 **Cursor** (`.cursor/mcp.json` 及用户全局设置)
+> - ✅ 自动识别并合并写入 **Claude Desktop** (`claude_desktop_config.json`，Windows/macOS/Linux)
+> - ✅ 自动识别并合并写入 **Windsurf** 与 **VS Code (Cline / Roo Code)**
+> - ✅ 自动为项目生成 **`CLAUDE.md`** 与 **`.cursorrules`** 最佳实践使用规范（吸收 CodeGraph 规范，防止 AI 泛滥读大文件导致上下文爆炸）
 
 ---
 
-## 🔌 配置到 AI 编程助手
+## 🛠️ 手动配置参考（可选）
+
+如果你习惯手动维护客户端配置文件，也可自行添加以下配置块：
 
 ### 1. 配置到 Claude Code
-
-**本地原生运行**：
 ```bash
-claude mcp add code-search-mcp -- uv --directory /path/to/code-search-mcp run main.py
+claude mcp add code-search-mcp -- uvx code-search-mcp serve
 ```
 
-**Docker 容器化运行**：
-```bash
-claude mcp add code-search-mcp -- docker run -i --rm -v "$(pwd):/workspace:ro" -v "code-search-cache:/root/.code-search-mcp" code-search-mcp:latest serve
-```
-
-或手动配置 `~/.claude.json`：
+### 2. 配置到 Claude Desktop / Cursor
+在对应客户端的 `mcpServers` 下追加：
 ```json
 {
   "mcpServers": {
-    "code-search": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-v", "${workspaceFolder}:/workspace:ro",
-        "-v", "code-search-cache:/root/.code-search-mcp",
-        "code-search-mcp:latest",
-        "serve"
-      ]
+    "code-search-mcp": {
+      "command": "uvx",
+      "args": ["code-search-mcp", "serve"]
     }
   }
 }
 ```
 
-### 2. 配置到 Cursor
+### 3. Docker 容器化运行（零环境依赖）
+```bash
+# 构建镜像
+docker build -t code-search-mcp:latest .
 
-进入 Cursor 的 **Settings -> Features -> MCP Servers -> Add New MCP Server**：
-
-- **Name**: `code-search`
-- **Type**: `command`
-- **Command（原生）**: `uv --directory /path/to/code-search-mcp run main.py`
-- **Command（Docker）**: `docker run -i --rm -v /绝对路径/代码库:/workspace:ro -v code-search-cache:/root/.code-search-mcp code-search-mcp:latest serve`
+# 启动容器
+docker run -i --rm -v "$(pwd):/workspace" code-search-mcp:latest serve
+```
+> 📖 详细 Docker 命令请参阅 [Docker 完整部署指南 (DOCKER_GUIDE.md)](DOCKER_GUIDE.md)。
 
 ---
 

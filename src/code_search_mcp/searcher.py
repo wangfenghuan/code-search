@@ -114,6 +114,26 @@ class CodeSearcher:
         self.repo_path = Path(repo_path).resolve()
         self.db_path = get_repo_db_path(self.repo_path)
         self.embedding_engine = EmbeddingEngine.get_instance()
+        # LanceDB 连接缓存：避免每次 search() 都重复执行 connect()+open_table() 磁盘 I/O
+        self._lancedb_conn = None
+        self._lancedb_table = None
+        self._cached_mtime = 0.0
+
+    def _get_table(self):
+        """懒加载并缓存 LanceDB 连接与表句柄（通过 meta.json mtime 自动感知增量更新）"""
+        meta_file = self.db_path / "meta.json"
+        curr_mtime = meta_file.stat().st_mtime if meta_file.exists() else 0.0
+        if self._lancedb_conn is None or self._lancedb_table is None or self._cached_mtime != curr_mtime:
+            self._lancedb_conn = lancedb.connect(str(self.db_path))
+            self._lancedb_table = self._lancedb_conn.open_table("code_chunks")
+            self._cached_mtime = curr_mtime
+        return self._lancedb_table
+
+    def _invalidate_cache(self):
+        """索引重建后清除连接缓存，强制下次 search 重新连接"""
+        self._lancedb_conn = None
+        self._lancedb_table = None
+        self._cached_mtime = 0.0
 
     def is_indexed(self) -> bool:
         if not self.db_path.exists():
@@ -125,13 +145,15 @@ class CodeSearcher:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
             # 校验 schema 版本与模型一致性，旧版本或模型不兼容时返回 False 触发重建
             if meta.get("schema_version") != INDEX_SCHEMA_VERSION:
+                self._invalidate_cache()
                 return False
             if meta.get("model_name") != DEFAULT_MODEL_NAME:
+                self._invalidate_cache()
                 return False
-            db = lancedb.connect(str(self.db_path))
-            tbl = db.open_table("code_chunks")
+            tbl = self._get_table()
             return len(tbl) > 0
         except Exception:
+            self._invalidate_cache()
             return False
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
@@ -143,8 +165,7 @@ class CodeSearcher:
         if not query_vec:
             return []
 
-        db = lancedb.connect(str(self.db_path))
-        table = db.open_table("code_chunks")
+        table = self._get_table()
 
         candidate_limit = max(top_k * 6, 40)
         k_rrf = 60.0
