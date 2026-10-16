@@ -245,7 +245,7 @@ def run_django_agent_exploration(django_core_dir: Path):
     print(f"⚡ 爆炸半径分析耗时: {dt3:.2f} ms | 读文件次数: 0 次")
     print(f"   • 受影响上游符号数: {impact.get('total_impacted_symbols', 0)} 个")
     print(f"   • 受波及文件数: {impact.get('impacted_files_count', 0)} 个")
-    print(f"   • 波及调用链样本: {[item['symbol'] for item in impact.get('impacted_tree', [])[:6]]}")
+    print(f"   • 波及调用链样本: {[item['symbol'] for item in impact.get('impact_propagation_chain', [])[:6]]}")
 
     return {
         "orm_query_latency_ms": dt,
