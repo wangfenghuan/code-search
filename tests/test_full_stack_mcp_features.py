@@ -44,13 +44,9 @@ def run_full_stack_tests_for_repo(repo_path: Path, repo_name: str, test_queries:
     res_data: Dict[str, Any] = {"repo_name": repo_name, "path": str(repo_path)}
 
     # 1. 全量向量嵌入与 LanceDB + FTS 索引构建 (index_codebase)
-    print(f"\n[1/10] 🚀 全量切片、模型向量嵌入与 LanceDB 持久化 (index_codebase)...")
-    searcher = CodeSearcher(repo_path)
+    print(f"\n[1/11] 🚀 全量切片、模型向量嵌入与 LanceDB 持久化 (index_codebase)...")
     t0_idx = time.perf_counter()
-    if not searcher.is_indexed():
-        index_msg = index_codebase(str(repo_path))
-    else:
-        index_msg = "已存在完整向量索引与 LanceDB 表"
+    index_msg = index_codebase(str(repo_path))
     t_idx = time.perf_counter() - t0_idx
 
     searcher = CodeSearcher(repo_path)
@@ -69,12 +65,21 @@ def run_full_stack_tests_for_repo(repo_path: Path, repo_name: str, test_queries:
         except Exception:
             dim = 512
 
+    # 立即测试图引擎首次查询延迟 (验证预构建已彻底消除冷启动)
+    t0_fg = time.perf_counter()
+    graph_engine = CodeGraphEngine.get_instance(repo_path)
+    probe_sym = test_queries.get("call_symbol", "Context")
+    probe_caller = graph_engine.get_callers(probe_sym)
+    t_first_graph_ms = (time.perf_counter() - t0_fg) * 1000
+
     print(f"   ✓ 向量化索引完成! 耗时: {t_idx:.2f}s | 生成向量数: {total_vectors} 条 (维度: {dim})")
+    print(f"   ✓ 图引擎首次查询延迟 (Eager Pre-build): {t_first_graph_ms:.2f} ms (消除冷启动)")
     print(f"   ✓ LanceDB 状态与 FTS 索引构建: 成功")
     res_data["index_codebase"] = {
         "time_sec": t_idx,
         "total_vectors": total_vectors,
         "vector_dim": dim,
+        "first_graph_latency_ms": t_first_graph_ms,
         "message": index_msg.splitlines()[0] if index_msg else "",
     }
 
@@ -258,6 +263,39 @@ def main():
                 "call_symbol": "Blueprint",
                 "callee_symbol": "Flask",
                 "explore_query": "蓝图注册与视图路由调度流",
+            },
+        },
+        {
+            "name": "Express.js (JavaScript Node)",
+            "path": ROOT_DIR / "tests" / "benchmark_repos" / "express",
+            "queries": {
+                "semantic_query": "middleware execution and express route matching",
+                "exact_pattern": "Router",
+                "call_symbol": "Router",
+                "callee_symbol": "Route",
+                "explore_query": "中间件路由分发与流水线匹配机制",
+            },
+        },
+        {
+            "name": "HTTPX (Python Async HTTP Client)",
+            "path": ROOT_DIR / "tests" / "benchmark_repos" / "httpx",
+            "queries": {
+                "semantic_query": "async HTTP request client connection pool",
+                "exact_pattern": "AsyncClient",
+                "call_symbol": "Client",
+                "callee_symbol": "Response",
+                "explore_query": "异步 HTTP 客户端连接池与重定向链路",
+            },
+        },
+        {
+            "name": "Zustand (TypeScript State Store)",
+            "path": ROOT_DIR / "tests" / "benchmark_repos" / "zustand",
+            "queries": {
+                "semantic_query": "state store creation and subscribe listener",
+                "exact_pattern": "createStore",
+                "call_symbol": "create",
+                "callee_symbol": "createStore",
+                "explore_query": "状态仓库创建与订阅更新流",
             },
         },
     ]
