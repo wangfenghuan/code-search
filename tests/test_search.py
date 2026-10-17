@@ -55,6 +55,18 @@ def test_multilang_tree_sitter():
     assert "OrderManager.CreateOrder" in go_names
     assert "OrderManager.CancelOrder" in go_names
 
+    # 1.4 Java 测试 (Spring Boot REST 控制器与服务)
+    java_symbols = parser.parse_file(sample_dir / "UserController.java", include_calls=True)
+    java_names = [s.name for s in java_symbols]
+    print(f"Java 提取符号: {java_names}")
+    assert "UserController" in java_names
+    assert "UserController.UserController" in java_names
+    assert "UserController.getUsers" in java_names
+    assert "UserController.createUser" in java_names
+    get_users = next(s for s in java_symbols if s.name == "UserController.getUsers")
+    assert get_users.route_info == "HTTP GET /api/v1/users"
+    assert any("UserService.findAll" in c for c in get_users.calls)
+
     print("✅ Tree-sitter 多语言语法解析 100% 通过！")
 
 
@@ -71,8 +83,10 @@ def test_outline_generation():
     assert "[typescript]" in md
     assert "[go]" in md
     assert "[python]" in md
+    assert "[java]" in md
     assert "PaymentGateway" in md
     assert "OrderManager" in md
+    assert "UserController" in md
     print("✅ 多语言架构大纲生成通过！")
 
 
@@ -106,6 +120,15 @@ def test_indexing_and_multilang_search():
         print(f"  命中: [{r['language']}] {r['file_path']} -> {r['symbol_name']} (得分: {r['similarity']})")
     assert any("order_handler.go" in r["file_path"] for r in res_go), "未能命中 Go 订单模块"
     print("✅ Go 跨语言语义检索通过！")
+
+    # 测试 C: 检索 Java 用户领域业务
+    q_java = "查询系统全部活跃用户"
+    res_java = searcher.search(q_java, top_k=2)
+    print(f"\n查询: '{q_java}'")
+    for r in res_java:
+        print(f"  命中: [{r['language']}] {r['file_path']} -> {r['symbol_name']} (得分: {r['similarity']})")
+    assert any("UserService" in r["symbol_name"] for r in res_java), "未能命中 Java 用户服务模块"
+    print("✅ Java 跨语言语义检索通过！")
 
 
 def test_exact_ripgrep_search():
