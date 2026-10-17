@@ -158,8 +158,18 @@ def get_leading_comment(node: Node, source_bytes: bytes) -> str:
 
 class TreeSitterParser:
     """工业级 Tree-sitter 多语言代码解析器 (基于 Tree-sitter Query S-expression 与微秒级线段树映射)"""
+    _instance: Optional["TreeSitterParser"] = None
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
 
     def __init__(self):
+        if getattr(self, "_initialized", False):
+            return
+        self._initialized = True
         self._parsers: Dict[str, Parser] = {}
         if PY_LANG:
             self._parsers["python"] = Parser(PY_LANG)
@@ -226,8 +236,53 @@ class TreeSitterParser:
         lang = EXTENSION_LANG_MAP.get(ext)
         return lang in self._parsers
 
-    def parse_code(self, source_bytes: bytes, file_name: str = "demo.py", lang: Optional[str] = None) -> List[ParsedSymbol]:
-        """直接解析内存中的源代码字节流"""
+    def extract_calls_from_code(
+        self,
+        code: str,
+        lang: str = "python",
+        imports: Optional[FileImports] = None,
+        module_name: str = "",
+    ) -> List[str]:
+        """按需从单段代码中快速提取所有调用的符号名 (微秒级单片段分析，用于按需 Callee 查询)"""
+        if not code or lang not in self._parsers:
+            return []
+        source_bytes = code.encode("utf-8") if isinstance(code, str) else code
+        parser = self._parsers[lang]
+        tree = parser.parse(source_bytes)
+        root = tree.root_node
+
+        query_map = {
+            "python": self._py_calls_query,
+            "typescript": self._ts_calls_query,
+            "javascript": self._js_calls_query,
+            "go": self._go_calls_query,
+        }
+        query = query_map.get(lang)
+        if not query:
+            del tree
+            return []
+        cursor = QueryCursor(query)
+        matches = cursor.matches(root)
+        if lang == "python":
+            calls = self._extract_py_calls(matches, source_bytes, imports, module_name, "")
+        elif lang in ("typescript", "javascript"):
+            calls = self._extract_ts_calls(matches, source_bytes, imports, module_name, "")
+        elif lang == "go":
+            calls = self._extract_go_calls(matches, source_bytes, imports, module_name)
+        else:
+            calls = []
+        del cursor
+        del tree
+        return calls
+
+    def parse_code(
+        self,
+        source_bytes: bytes,
+        file_name: str = "demo.py",
+        lang: Optional[str] = None,
+        include_calls: bool = True,
+    ) -> List[ParsedSymbol]:
+        """直接解析内存中的源代码字节流 (include_calls=False 时仅提取顶层符号定义，毫秒级轻量跳过调用边遍历)"""
         if not lang:
             ext = Path(file_name).suffix.lower()
             lang = EXTENSION_LANG_MAP.get(ext)
@@ -240,27 +295,27 @@ class TreeSitterParser:
         tree = parser.parse(source_bytes)
         root = tree.root_node
 
-        line_starts = [0] + [m.end() for m in re.finditer(b"\\n", source_bytes)]
+        line_starts = [0] + [m.end() for m in re.finditer(b"\n", source_bytes)]
 
         def byte_to_line(b: int) -> int:
             return bisect.bisect_right(line_starts, b)
 
         module_name = get_module_name_from_path(file_name)
-        imports = self._extract_imports(root, source_bytes, lang)
+        imports = self._extract_imports(root, source_bytes, lang) if include_calls else None
         symbols: List[ParsedSymbol] = []
 
         if lang == "python":
-            self._parse_python(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line)
+            self._parse_python(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line, include_calls=include_calls)
         elif lang in ("typescript", "javascript"):
-            self._parse_ts_js(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line, lang=lang)
+            self._parse_ts_js(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line, lang=lang, include_calls=include_calls)
         elif lang == "go":
-            self._parse_go(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line)
+            self._parse_go(tree, source_bytes, symbols, imports=imports, module_name=module_name, file_path=file_name, byte_to_line=byte_to_line, include_calls=include_calls)
 
         del tree
         return symbols
 
-    def parse_file(self, file_path: Path, rel_path: Optional[str] = None) -> List[ParsedSymbol]:
-        """读取文件并解析为符号定义列表"""
+    def parse_file(self, file_path: Path, rel_path: Optional[str] = None, include_calls: bool = True) -> List[ParsedSymbol]:
+        """读取文件并解析为符号定义列表 (可指定 include_calls=False，纯符号定义秒级抽取)"""
         ext = file_path.suffix.lower()
         lang = EXTENSION_LANG_MAP.get(ext)
         if not lang or lang not in self._parsers:
@@ -272,7 +327,7 @@ class TreeSitterParser:
             return []
 
         path_for_module = rel_path if rel_path else file_path.as_posix()
-        return self.parse_code(source_bytes, path_for_module, lang)
+        return self.parse_code(source_bytes, path_for_module, lang, include_calls=include_calls)
 
     def _extract_imports(self, root: Node, source: bytes, lang: str) -> FileImports:
         """从源文件中提取 import / require 及顶级实例化，建立跨文件符号表"""
@@ -616,6 +671,7 @@ class TreeSitterParser:
         module_name: str = "",
         file_path: str = "",
         byte_to_line=None,
+        include_calls: bool = False,
     ):
         if byte_to_line is None:
             line_starts = [0] + [m.end() for m in re.finditer(b"\n", source)]
@@ -661,20 +717,21 @@ class TreeSitterParser:
                 )
             del cursor_cls
 
-        # 2. 声明式查询函数/方法定义与单遍二分调用匹配 (Single-Pass Call Site Extraction)
-        if self._py_fn_query and self._py_calls_query:
+        # 2. 声明式查询函数/方法定义 (当 include_calls=False 时跳过 AST 调用边遍历)
+        if self._py_fn_query:
             cursor_fn = QueryCursor(self._py_fn_query)
-            cursor_calls = QueryCursor(self._py_calls_query)
-
             all_file_calls = []
-            for pat, cap in cursor_calls.matches(root):
-                if "call.root" in cap:
-                    sb = int(cap["call.root"][0].start_byte)
-                    all_file_calls.append((sb, pat, cap))
-            del cursor_calls
-            if all_file_calls:
-                all_file_calls.sort(key=lambda x: x[0])
-            call_starts = [x[0] for x in all_file_calls]
+            call_starts = []
+            if include_calls and self._py_calls_query:
+                cursor_calls = QueryCursor(self._py_calls_query)
+                for pat, cap in cursor_calls.matches(root):
+                    if "call.root" in cap:
+                        sb = int(cap["call.root"][0].start_byte)
+                        all_file_calls.append((sb, pat, cap))
+                del cursor_calls
+                if all_file_calls:
+                    all_file_calls.sort(key=lambda x: x[0])
+                call_starts = [x[0] for x in all_file_calls]
             cls_starts = [c["start"] for c in classes]
 
             for pat, cap in cursor_fn.matches(root):
@@ -703,7 +760,6 @@ class TreeSitterParser:
                     curr = curr.parent
 
                 # 所属类判定：二分查找 O(log K) 替代全量 O(K) 线性扫描
-                # classes 在进入本循环前已按 start_byte 升序排列（由 tree-sitter 查询顺序保证）
                 parent_cls = None
                 hi = bisect.bisect_right(cls_starts, s_byte)
                 best_span = None
@@ -726,11 +782,14 @@ class TreeSitterParser:
                 params_node = def_node.child_by_field_name("parameters")
                 sig = get_node_text(params_node, source) if params_node else "()"
 
-                # 二分区间查询调用 (O(log K) 极速匹配)
-                idx_left = bisect.bisect_left(call_starts, int(def_node.start_byte))
-                idx_right = bisect.bisect_right(call_starts, int(def_node.end_byte))
-                call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
-                fn_calls = self._extract_py_calls(call_matches, source, imports, module_name, parent_cls or "")
+                # 二分区间查询调用 (仅当 include_calls=True 时执行)
+                if include_calls and all_file_calls:
+                    idx_left = bisect.bisect_left(call_starts, int(def_node.start_byte))
+                    idx_right = bisect.bisect_right(call_starts, int(def_node.end_byte))
+                    call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
+                    fn_calls = self._extract_py_calls(call_matches, source, imports, module_name, parent_cls or "")
+                else:
+                    fn_calls = []
 
                 qname = f"{module_name}.{full_name}" if module_name else full_name
                 symbols.append(
@@ -762,6 +821,7 @@ class TreeSitterParser:
         file_path: str = "",
         byte_to_line=None,
         lang: str = "typescript",
+        include_calls: bool = False,
     ):
         if byte_to_line is None:
             line_starts = [0] + [m.end() for m in re.finditer(b"\n", source)]
@@ -807,19 +867,20 @@ class TreeSitterParser:
                 )
             del cursor_cls
 
-        if defs_query and calls_query:
+        if defs_query:
             cursor_defs = QueryCursor(defs_query)
-            cursor_calls = QueryCursor(calls_query)
-
             all_file_calls = []
-            for pat, cap in cursor_calls.matches(root):
-                if "call.root" in cap:
-                    sb = int(cap["call.root"][0].start_byte)
-                    all_file_calls.append((sb, pat, cap))
-            del cursor_calls
-            if all_file_calls:
-                all_file_calls.sort(key=lambda x: x[0])
-            call_starts = [x[0] for x in all_file_calls]
+            call_starts = []
+            if include_calls and calls_query:
+                cursor_calls = QueryCursor(calls_query)
+                for pat, cap in cursor_calls.matches(root):
+                    if "call.root" in cap:
+                        sb = int(cap["call.root"][0].start_byte)
+                        all_file_calls.append((sb, pat, cap))
+                del cursor_calls
+                if all_file_calls:
+                    all_file_calls.sort(key=lambda x: x[0])
+                call_starts = [x[0] for x in all_file_calls]
 
             for pat, cap in cursor_defs.matches(root):
                 item_node = None
@@ -869,11 +930,14 @@ class TreeSitterParser:
                 doc = get_leading_comment(outer_node, source)
                 route = self._extract_route_from_text(code_text)
 
-                # 二分区间查询调用 (O(log K) 极速匹配)
-                idx_left = bisect.bisect_left(call_starts, int(item_node.start_byte))
-                idx_right = bisect.bisect_right(call_starts, int(item_node.end_byte))
-                call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
-                fn_calls = self._extract_ts_calls(call_matches, source, imports, module_name, parent_cls or "")
+                # 二分区间查询调用 (仅当 include_calls=True 时执行)
+                if include_calls and all_file_calls:
+                    idx_left = bisect.bisect_left(call_starts, int(item_node.start_byte))
+                    idx_right = bisect.bisect_right(call_starts, int(item_node.end_byte))
+                    call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
+                    fn_calls = self._extract_ts_calls(call_matches, source, imports, module_name, parent_cls or "")
+                else:
+                    fn_calls = []
 
                 full_name = f"{parent_cls}.{name}" if parent_cls else name
                 qname = f"{module_name}.{full_name}" if module_name else full_name
@@ -905,6 +969,7 @@ class TreeSitterParser:
         module_name: str = "",
         file_path: str = "",
         byte_to_line=None,
+        include_calls: bool = False,
     ):
         if byte_to_line is None:
             line_starts = [0] + [m.end() for m in re.finditer(b"\n", source)]
@@ -943,19 +1008,20 @@ class TreeSitterParser:
                 )
             del cursor_types
 
-        if self._go_defs_query and self._go_calls_query:
+        if self._go_defs_query:
             cursor_defs = QueryCursor(self._go_defs_query)
-            cursor_calls = QueryCursor(self._go_calls_query)
-
             all_file_calls = []
-            for pat, cap in cursor_calls.matches(root):
-                if "call.root" in cap:
-                    sb = int(cap["call.root"][0].start_byte)
-                    all_file_calls.append((sb, pat, cap))
-            del cursor_calls
-            if all_file_calls:
-                all_file_calls.sort(key=lambda x: x[0])
-            call_starts = [x[0] for x in all_file_calls]
+            call_starts = []
+            if include_calls and self._go_calls_query:
+                cursor_calls = QueryCursor(self._go_calls_query)
+                for pat, cap in cursor_calls.matches(root):
+                    if "call.root" in cap:
+                        sb = int(cap["call.root"][0].start_byte)
+                        all_file_calls.append((sb, pat, cap))
+                del cursor_calls
+                if all_file_calls:
+                    all_file_calls.sort(key=lambda x: x[0])
+                call_starts = [x[0] for x in all_file_calls]
 
             for pat, cap in cursor_defs.matches(root):
                 if "method.def" in cap:
@@ -975,10 +1041,13 @@ class TreeSitterParser:
                     params_node = node.child_by_field_name("parameters")
                     sig = get_node_text(params_node, source) if params_node else "()"
 
-                    idx_left = bisect.bisect_left(call_starts, s_byte)
-                    idx_right = bisect.bisect_right(call_starts, e_byte)
-                    call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
-                    fn_calls = self._extract_go_calls(call_matches, source, imports, module_name)
+                    if include_calls and all_file_calls:
+                        idx_left = bisect.bisect_left(call_starts, s_byte)
+                        idx_right = bisect.bisect_right(call_starts, e_byte)
+                        call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
+                        fn_calls = self._extract_go_calls(call_matches, source, imports, module_name)
+                    else:
+                        fn_calls = []
 
                     qname = f"{module_name}.{full_name}" if module_name else full_name
                     symbols.append(
@@ -1010,10 +1079,13 @@ class TreeSitterParser:
                     params_node = node.child_by_field_name("parameters") or node.child_by_field_name("parameter_list")
                     sig = get_node_text(params_node, source) if params_node else "()"
 
-                    idx_left = bisect.bisect_left(call_starts, s_byte)
-                    idx_right = bisect.bisect_right(call_starts, e_byte)
-                    call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
-                    fn_calls = self._extract_go_calls(call_matches, source, imports, module_name)
+                    if include_calls and all_file_calls:
+                        idx_left = bisect.bisect_left(call_starts, s_byte)
+                        idx_right = bisect.bisect_right(call_starts, e_byte)
+                        call_matches = [(item[1], item[2]) for item in all_file_calls[idx_left:idx_right]]
+                        fn_calls = self._extract_go_calls(call_matches, source, imports, module_name)
+                    else:
+                        fn_calls = []
 
                     qname = f"{module_name}.{fn_name}" if module_name else fn_name
                     symbols.append(

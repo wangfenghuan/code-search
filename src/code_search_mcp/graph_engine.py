@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import threading
 from collections import defaultdict, deque
@@ -9,6 +10,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import lancedb
 
 from code_search_mcp.config import INDEX_SCHEMA_VERSION, get_repo_db_path
+from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser
+from code_search_mcp.ripgrep_engine import ExactSearchEngine
 from code_search_mcp.searcher import CodeSearcher
 
 _engine_cache: Dict[str, "CodeGraphEngine"] = {}
@@ -32,11 +35,11 @@ class SymbolNode:
 
 
 class CodeGraphEngine:
-    """轻量级多语言代码知识图谱引擎 (启发自 CodeGraph)
+    """轻量级多语言代码知识图谱引擎 (启发自 CodeGraph 与 Zed)
 
     核心能力:
-    1. 上游追踪 (get_callers): 谁调用了这个符号
-    2. 下游追踪 (get_callees): 这个符号调用了哪些下级函数与服务
+    1. 上游追踪 (get_callers): 谁调用了这个符号 (按需 ripgrep + tree-sitter 秒级抽取)
+    2. 下游追踪 (get_callees): 这个符号调用了哪些下级函数与服务 (按需微秒级函数体解析)
     3. 爆炸半径 (get_impact_radius): 改动该符号会影响哪些上层模块、测试与外部 API 路由
     4. 一键探索 (explore_feature): 语义检索 + 拓扑图双向展开，1 次调用直出全链路证据
     """
@@ -77,6 +80,12 @@ class CodeGraphEngine:
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 val TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS resolved_queries (
+                query_type TEXT,
+                symbol_name TEXT,
+                PRIMARY KEY (query_type, symbol_name)
             );
 
             CREATE TABLE IF NOT EXISTS nodes (
@@ -127,6 +136,7 @@ class CodeGraphEngine:
             CREATE INDEX IF NOT EXISTS idx_nodes_sym ON nodes(symbol_name);
             CREATE INDEX IF NOT EXISTS idx_nodes_qual ON nodes(qualified_name);
             CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
+            CREATE INDEX IF NOT EXISTS idx_nodes_line ON nodes(file_path, start_line, end_line);
             CREATE INDEX IF NOT EXISTS idx_nodes_route ON nodes(route_info);
             CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name);
             CREATE INDEX IF NOT EXISTS idx_calls_callee_qual ON calls(callee_qualified);
@@ -172,6 +182,7 @@ class CodeGraphEngine:
         self._init_sqlite_schema(conn)
 
         # 清理旧数据，保证一致性
+        conn.execute("DELETE FROM resolved_queries;")
         conn.execute("DELETE FROM resolved_edges;")
         conn.execute("DELETE FROM calls;")
         conn.execute("DELETE FROM nodes;")
@@ -285,8 +296,9 @@ class CodeGraphEngine:
                 calls_to_insert
             )
 
-        # Stage 2: 全局解析二次遍历 (Global Resolution Pass)，建立确定性拓扑边
-        self._resolve_all_edges(conn)
+        # 仅当显式提供了调用边（如全量带调用的单元测试）时执行全局遍历；全库轻量索引时跳过，依赖按需秒级解析
+        if calls_to_insert:
+            self._resolve_all_edges(conn)
 
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (INDEX_SCHEMA_VERSION,))
         conn.commit()
@@ -585,6 +597,463 @@ class CodeGraphEngine:
         import gc
         gc.collect()
 
+    def _is_query_resolved(self, query_type: str, symbol_name: str) -> bool:
+        try:
+            conn = self._get_db()
+            row = conn.execute(
+                "SELECT 1 FROM resolved_queries WHERE query_type = ? AND symbol_name = ?",
+                (query_type, symbol_name),
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
+    def _mark_query_resolved(self, query_type: str, symbol_name: str):
+        try:
+            conn = self._get_db()
+            conn.execute(
+                "INSERT OR REPLACE INTO resolved_queries VALUES (?, ?)",
+                (query_type, symbol_name),
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+    def _extract_file_imports(self, file_path: str, lang: str) -> Optional[Any]:
+        try:
+            p = Path(file_path)
+            full_path = p if p.is_absolute() else (self.repo_path / file_path)
+            if not full_path.exists():
+                return None
+            source = full_path.read_bytes()
+            parser = TreeSitterParser()
+            ts_p = parser._parsers.get(lang)
+            if not ts_p:
+                return None
+            tree = ts_p.parse(source)
+            imports = parser._extract_imports(tree.root_node, source, lang)
+            del tree
+            return imports
+        except Exception:
+            return None
+
+    def _resolve_callers_on_demand(self, symbol_name: str):
+        """按需构建上游调用方拓扑 (启发自 Zed)：
+        利用 ripgrep 秒级扫描仓库中的文本匹配行，再结合 SQLite 节点区间判定所属调用函数，
+        精准落库至 resolved_edges 并缓存结果，彻底消除索引阶段的全量预计算开销。
+        """
+        if self._is_query_resolved("callers", symbol_name):
+            return
+        self._mark_query_resolved("callers", symbol_name)
+
+        bare_name = symbol_name.split(".")[-1].strip()
+        if not bare_name:
+            return
+
+        conn = self._get_db()
+        # 1. 查询目标符号在 nodes 中的所有候选定义
+        cursor = conn.execute(
+            """
+            SELECT id, symbol_name, qualified_name, file_path, start_line, end_line, module_name
+            FROM nodes
+            WHERE symbol_name = ? OR symbol_name LIKE ? OR qualified_name = ? OR qualified_name LIKE ?
+            """,
+            (symbol_name, f"%.{bare_name}", symbol_name, f"%.{bare_name}"),
+        )
+        def_rows = cursor.fetchall()
+        def_ids = {r["id"] for r in def_rows}
+        def_locs = set()
+        for r in def_rows:
+            fp = r["file_path"].replace("\\", "/")
+            sl = r["start_line"]
+            def_locs.add((fp, sl))
+            try:
+                rel_p = str(Path(fp).relative_to(self.repo_path)).replace("\\", "/")
+                def_locs.add((rel_p, sl))
+            except Exception:
+                pass
+            try:
+                abs_p = str((self.repo_path / fp).resolve()).replace("\\", "/")
+                def_locs.add((abs_p, sl))
+            except Exception:
+                pass
+
+        # 2. 调用 ripgrep 在仓库中高速搜索 bare_name
+        rg_engine = ExactSearchEngine(self.repo_path)
+        pattern = r"\b" + re.escape(bare_name) + r"\b"
+        search_res = rg_engine.search(pattern, is_regex=True, case_sensitive=True, max_results=500)
+        matches = list(search_res.get("matches", []))
+        if not matches:
+            return
+
+        edges_to_insert = []
+        calls_to_insert = []
+        seen_edges = set()
+
+        def _match_path(p1: str, p2: str) -> bool:
+            if not p1 or not p2:
+                return False
+            n1 = p1.replace("\\", "/").rstrip("/")
+            n2 = p2.replace("\\", "/").rstrip("/")
+            return n1 == n2 or n1.endswith("/" + n2) or n2.endswith("/" + n1)
+
+        # 检查是否有 import alias (例如: from pkg_b.service import handle as handle_b)
+        extra_matches = []
+        for m in matches:
+            line_txt = m.line_content
+            if "import " in line_txt and " as " in line_txt:
+                alias_m = re.search(r'\b(?:import\s+[^,;]*?\b' + re.escape(bare_name) + r'|from\s+[\w\.]+\s+import\s+[^,;]*?\b' + re.escape(bare_name) + r')\s+as\s+([a-zA-Z_]\w*)', line_txt)
+                if alias_m:
+                    alias_name = alias_m.group(1)
+                    alias_res = rg_engine.search(r"\b" + re.escape(alias_name) + r"\b", is_regex=True, case_sensitive=True, file_glob=f"*{Path(m.file_path).name}", max_results=50)
+                    for am in alias_res.get("matches", []):
+                        if am.file_path == m.file_path and am.line_number != m.line_number:
+                            extra_matches.append(am)
+        matches.extend(extra_matches)
+
+        file_imports_cache: Dict[str, Any] = {}
+        caller_text_cache: Dict[str, str] = {}
+        caller_node_cache: Dict[Tuple[str, int], Any] = {}
+
+        for m in matches:
+            f_path = m.file_path.replace("\\", "/")
+            l_num = m.line_number
+
+            # 排除定义点自身所在行
+            if (f_path, l_num) in def_locs:
+                continue
+
+            # 3. 在 SQLite 中二分区间查出当前行归属的外层 caller node (使用 B-Tree 索引快速定位)
+            loc_key = (f_path, l_num)
+            if loc_key in caller_node_cache:
+                caller_node = caller_node_cache[loc_key]
+            else:
+                f_abs = str((self.repo_path / f_path).resolve()).replace("\\", "/")
+                caller_node = conn.execute(
+                    """
+                    SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, module_name, qualified_name, code
+                    FROM nodes
+                    WHERE file_path IN (?, ?) AND start_line <= ? AND end_line >= ?
+                    ORDER BY (end_line - start_line) ASC
+                    LIMIT 1
+                    """,
+                    (f_path, f_abs, l_num, l_num),
+                ).fetchone()
+                caller_node_cache[loc_key] = caller_node
+
+            if not caller_node:
+                continue
+
+            # 若自身调用自身定义行，跳过
+            if caller_node["id"] in def_ids and caller_node["start_line"] == l_num:
+                continue
+
+            caller_id = caller_node["id"]
+            caller_sym = caller_node["symbol_name"]
+            caller_file = caller_node["file_path"]
+            caller_mod = caller_node["module_name"] or ""
+            caller_qual = caller_node["qualified_name"] or caller_sym
+
+            # 4. 拓扑目标消歧
+            target_node = None
+            res_type = "GLOBAL_UNIQUE"
+            conf = 0.85
+
+            if def_rows:
+                # 4.1 同文件就近
+                same_f = [d for d in def_rows if _match_path(d["file_path"], caller_file)]
+                if same_f:
+                    target_node = same_f[0]
+                    res_type = "SAME_FILE"
+                    conf = 0.98
+                else:
+                    # 4.2 检查调用文件是否显式导入特定候选模块
+                    if caller_file not in file_imports_cache:
+                        ext = Path(caller_file).suffix.lower()
+                        lang = EXTENSION_LANG_MAP.get(ext, "python")
+                        file_imports_cache[caller_file] = self._extract_file_imports(caller_file, lang)
+                    file_imports = file_imports_cache[caller_file]
+
+                    matched_import_node = None
+                    if file_imports:
+                        for d in def_rows:
+                            d_mod = d["module_name"] or ""
+                            d_q = d["qualified_name"] or ""
+                            if (d_mod and d_mod in file_imports.modules) or any(d_q == sym_q for sym_q in file_imports.symbols.values()):
+                                matched_import_node = d
+                                break
+                    if not matched_import_node:
+                        if caller_file not in caller_text_cache:
+                            try:
+                                cf_p = Path(caller_file)
+                                full_f = cf_p if cf_p.is_absolute() else (self.repo_path / caller_file)
+                                caller_text_cache[caller_file] = full_f.read_text(encoding="utf-8", errors="replace")
+                            except Exception:
+                                caller_text_cache[caller_file] = ""
+                        caller_text = caller_text_cache[caller_file]
+
+                        for d in def_rows:
+                            d_mod = d["module_name"] or ""
+                            if d_mod and (f"import {d_mod}" in caller_text or f"from {d_mod}" in caller_text):
+                                matched_import_node = d
+                                break
+
+                    if matched_import_node:
+                        target_node = matched_import_node
+                        res_type = "EXACT_QUALIFIED"
+                        conf = 0.95
+                    else:
+                        # 4.3 同目录就近
+                        caller_dir = Path(caller_file).parent.as_posix()
+                        same_d = [d for d in def_rows if _match_path(Path(d["file_path"]).parent.as_posix(), caller_dir)]
+                        if len(same_d) == 1:
+                            target_node = same_d[0]
+                            res_type = "SAME_DIR"
+                            conf = 0.92
+                        elif len(same_d) > 1:
+                            target_node = same_d[0]
+                            res_type = "PACKAGE_EXPORT"
+                            conf = 0.90
+                        else:
+                            if len(def_rows) == 1:
+                                target_node = def_rows[0]
+                                res_type = "GLOBAL_UNIQUE"
+                                conf = 0.85
+                            else:
+                                target_node = def_rows[0]
+                                res_type = "AMBIGUOUS"
+                                conf = 0.65
+            else:
+                res_type = "EXTERNAL"
+                conf = 0.50
+
+            callee_id = target_node["id"] if target_node else None
+            callee_sym = target_node["symbol_name"] if target_node else bare_name
+            callee_file = target_node["file_path"] if target_node else None
+            callee_qual = target_node["qualified_name"] if target_node else bare_name
+
+            edge_key = (caller_id, callee_id, bare_name)
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+
+            edges_to_insert.append((
+                caller_id, caller_sym, caller_file, caller_mod, caller_qual,
+                callee_id, callee_sym, callee_file, callee_qual, bare_name,
+                res_type, conf, 0, ""
+            ))
+            calls_to_insert.append((
+                caller_id, caller_sym, bare_name, callee_qual, 0, "", caller_file
+            ))
+
+        if edges_to_insert:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO resolved_edges (
+                    caller_id, caller_symbol, caller_file, caller_module, caller_qualified,
+                    callee_id, callee_symbol, callee_file, callee_qualified, call_name,
+                    resolution_type, confidence, is_dynamic, dynamic_expr
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                edges_to_insert,
+            )
+        if calls_to_insert:
+            conn.executemany(
+                """
+                INSERT INTO calls (
+                    caller_id, caller_symbol, callee_name, callee_qualified,
+                    is_dynamic, dynamic_expr, source_file
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                calls_to_insert,
+            )
+        conn.commit()
+
+    def _resolve_callees_on_demand(self, symbol_name: str):
+        """按需提取单个符号函数体内的下游调用点并消歧解析 (启发自 Zed)：
+        仅在用户查询该符号时，微秒级对其代码体运行 tree-sitter 抽取调用并关联目标定义，
+        杜绝索引阶段解析全库 30,000 条调用边的内存暴涨。
+        """
+        if self._is_query_resolved("callees", symbol_name):
+            return
+        self._mark_query_resolved("callees", symbol_name)
+
+        conn = self._get_db()
+        cursor = conn.execute(
+            "SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, code, module_name, qualified_name FROM nodes WHERE symbol_name = ? OR qualified_name = ? LIMIT 10",
+            (symbol_name, symbol_name),
+        )
+        nodes = cursor.fetchall()
+        if not nodes and "." in symbol_name:
+            short = symbol_name.split(".")[-1]
+            cursor = conn.execute(
+                "SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, code, module_name, qualified_name FROM nodes WHERE symbol_name = ? OR symbol_name LIKE ? OR qualified_name LIKE ? LIMIT 10",
+                (short, f"%.{short}", f"%.{symbol_name}"),
+            )
+            nodes = cursor.fetchall()
+        elif not nodes:
+            cursor = conn.execute(
+                "SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, code, module_name, qualified_name FROM nodes WHERE symbol_name LIKE ? OR qualified_name LIKE ? LIMIT 10",
+                (f"%.{symbol_name}", f"%.{symbol_name}"),
+            )
+            nodes = cursor.fetchall()
+
+        if not nodes:
+            return
+
+        parser = TreeSitterParser()
+        edges_to_insert = []
+        calls_to_insert = []
+        seen_edges = set()
+
+        for node in nodes:
+            caller_id = node["id"]
+            caller_sym = node["symbol_name"]
+            caller_file = node["file_path"]
+            caller_mod = node["module_name"] or ""
+            caller_qual = node["qualified_name"] or caller_sym
+            code = node["code"] or ""
+            if not code.strip():
+                continue
+
+            ext = Path(caller_file).suffix.lower()
+            lang = EXTENSION_LANG_MAP.get(ext, "python")
+
+            # 提取文件级 import 用于跨文件别名/实例化解析
+            file_imports = self._extract_file_imports(caller_file, lang)
+
+            try:
+                call_items = parser.extract_calls_from_code(
+                    code, lang=lang, imports=file_imports, module_name=caller_mod
+                )
+            except Exception:
+                call_items = []
+
+            for call_str in call_items:
+                call_str = str(call_str).strip()
+                if not call_str:
+                    continue
+
+                is_dyn = 1 if ("<dynamic:" in call_str or call_str.startswith("dynamic:")) else 0
+                dyn_expr = call_str if is_dyn else ""
+                c_name = call_str.replace("<dynamic:", "").replace(">", "").strip() if is_dyn else call_str
+                c_name_bare = c_name.split(".")[-1] if "." in c_name else c_name
+
+                # 若调用的符号名是 import 别名 (例如 handle_b)，转换为导入的目标全限定名
+                if file_imports and c_name_bare in file_imports.symbols:
+                    mapped_qname = file_imports.symbols[c_name_bare]
+                    c_name = mapped_qname
+                    c_name_bare = mapped_qname.split(".")[-1]
+
+                # 在 nodes 表中匹配被调用目标定义
+                cands_cursor = conn.execute(
+                    """
+                    SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, module_name, qualified_name, docstring
+                    FROM nodes
+                    WHERE symbol_name = ? OR qualified_name = ? OR symbol_name = ? OR symbol_name LIKE ? OR qualified_name LIKE ?
+                    """,
+                    (c_name_bare, c_name, c_name, f"%.{c_name_bare}", f"%.{c_name}"),
+                )
+                cands = cands_cursor.fetchall()
+
+                target_node = None
+                res_type = "GLOBAL_UNIQUE"
+                conf = 0.85
+
+                if cands:
+                    # 1. 显式限定名匹配 (EXACT_QUALIFIED)
+                    if "." in c_name:
+                        exact_qual = [c for c in cands if c["qualified_name"] == c_name or c["symbol_name"] == c_name]
+                        if exact_qual:
+                            target_node = exact_qual[0]
+                            res_type = "EXACT_QUALIFIED"
+                            conf = 0.95
+
+                    if not target_node and file_imports:
+                        # 检查是否通过 imports 明确导入
+                        for c in cands:
+                            c_q = c["qualified_name"] or c["symbol_name"]
+                            c_m = c["module_name"] or ""
+                            if (c_m and c_m in file_imports.modules) or (c_name_bare in file_imports.symbols):
+                                target_node = c
+                                res_type = "EXACT_QUALIFIED"
+                                conf = 0.95
+                                break
+
+                    if not target_node:
+                        # 2. 同文件就近
+                        same_f = [c for c in cands if c["file_path"] == caller_file]
+                        if len(same_f) == 1:
+                            target_node = same_f[0]
+                            res_type = "SAME_FILE"
+                            conf = 0.98
+                        else:
+                            # 3. 同目录
+                            caller_dir = Path(caller_file).parent.as_posix()
+                            same_d = [c for c in cands if Path(c["file_path"]).parent.as_posix() == caller_dir]
+                            if len(same_d) == 1:
+                                target_node = same_d[0]
+                                res_type = "SAME_DIR"
+                                conf = 0.92
+                            elif len(same_d) > 1:
+                                target_node = same_d[0]
+                                res_type = "PACKAGE_EXPORT"
+                                conf = 0.90
+                            else:
+                                if len(cands) == 1:
+                                    target_node = cands[0]
+                                    res_type = "GLOBAL_UNIQUE"
+                                    conf = 0.85
+                                else:
+                                    target_node = cands[0]
+                                    res_type = "AMBIGUOUS"
+                                    conf = 0.65
+                else:
+                    res_type = "EXTERNAL"
+                    conf = 0.50
+
+                callee_id = target_node["id"] if target_node else None
+                callee_sym = target_node["symbol_name"] if target_node else c_name_bare
+                callee_file = target_node["file_path"] if target_node else None
+                callee_qual = target_node["qualified_name"] if target_node else c_name
+
+                edge_key = (caller_id, callee_id, c_name_bare, is_dyn)
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
+
+                edges_to_insert.append((
+                    caller_id, caller_sym, caller_file, caller_mod, caller_qual,
+                    callee_id, callee_sym, callee_file, callee_qual, c_name_bare,
+                    res_type, conf, is_dyn, dyn_expr
+                ))
+                calls_to_insert.append((
+                    caller_id, caller_sym, c_name_bare, callee_qual, is_dyn, dyn_expr, caller_file
+                ))
+
+        if edges_to_insert:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO resolved_edges (
+                    caller_id, caller_symbol, caller_file, caller_module, caller_qualified,
+                    callee_id, callee_symbol, callee_file, callee_qualified, call_name,
+                    resolution_type, confidence, is_dynamic, dynamic_expr
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                edges_to_insert,
+            )
+        if calls_to_insert:
+            conn.executemany(
+                """
+                INSERT INTO calls (
+                    caller_id, caller_symbol, callee_name, callee_qualified,
+                    is_dynamic, dynamic_expr, source_file
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                calls_to_insert,
+            )
+        conn.commit()
+
     @classmethod
     def get_instance(cls, repo_path: str | Path) -> "CodeGraphEngine":
         """获取或创建代码库对应的图引擎单例"""
@@ -633,8 +1102,7 @@ class CodeGraphEngine:
                 conn = self._get_db()
                 self._init_sqlite_schema(conn)
                 row_nodes = conn.execute("SELECT count(*) as c FROM nodes").fetchone()
-                row_edges = conn.execute("SELECT count(*) as c FROM resolved_edges").fetchone()
-                if row_nodes and row_nodes['c'] > 0 and row_edges and row_edges['c'] > 0:
+                if row_nodes and row_nodes['c'] > 0:
                     self._loaded = True
                     return True
             except Exception:
@@ -744,6 +1212,10 @@ class CodeGraphEngine:
             }
 
         conn = self._get_db()
+        # 按需秒级扫描与消歧上游调用方 (启发自 Zed)
+        self._resolve_callers_on_demand(symbol_name)
+
+        bare_name = symbol_name.split(".")[-1]
         # 如果 symbol_name 包含限定名，则精确按限定名查找目标定义；否则按 symbol_name 查找全库对应定义
         if "." in symbol_name:
             cursor = conn.execute(
@@ -753,8 +1225,8 @@ class CodeGraphEngine:
             def_rows = cursor.fetchall()
             if not def_rows:
                 cursor = conn.execute(
-                    "SELECT id, symbol_name, qualified_name, file_path, start_line FROM nodes WHERE qualified_name LIKE ? OR symbol_name = ?",
-                    (f"%.{symbol_name}", symbol_name),
+                    "SELECT id, symbol_name, qualified_name, file_path, start_line FROM nodes WHERE qualified_name LIKE ? OR symbol_name LIKE ?",
+                    (f"%.{symbol_name}", f"%.{bare_name}"),
                 )
                 def_rows = cursor.fetchall()
         else:
@@ -763,6 +1235,12 @@ class CodeGraphEngine:
                 (symbol_name, symbol_name),
             )
             def_rows = cursor.fetchall()
+            if not def_rows:
+                cursor = conn.execute(
+                    "SELECT id, symbol_name, qualified_name, file_path, start_line FROM nodes WHERE symbol_name LIKE ? OR qualified_name LIKE ?",
+                    (f"%.{bare_name}", f"%.{bare_name}"),
+                )
+                def_rows = cursor.fetchall()
 
         is_defined_in_repo = len(def_rows) > 0
         unique_defs = list({f"{r['file_path']}:{r['start_line']}": r for r in def_rows}.values())
@@ -785,12 +1263,12 @@ class CodeGraphEngine:
                     e.resolution_type, e.confidence, e.callee_qualified
                 FROM resolved_edges e
                 JOIN nodes n ON e.caller_id = n.id
-                WHERE (e.callee_id IN ({id_placeholders}) OR e.callee_symbol = ? OR e.call_name = ?)
+                WHERE (e.callee_id IN ({id_placeholders}) OR e.callee_qualified = ?)
                   AND e.confidence >= 0.25
                   AND e.resolution_type != 'EXTERNAL'
                 ORDER BY e.confidence DESC, n.file_path, n.start_line
             """
-            cursor = conn.execute(query_sql, target_node_ids + [symbol_name, symbol_name])
+            cursor = conn.execute(query_sql, target_node_ids + [symbol_name])
             caller_rows = cursor.fetchall()
         else:
             query_sql = """
@@ -804,7 +1282,7 @@ class CodeGraphEngine:
                   AND e.resolution_type != 'EXTERNAL'
                 ORDER BY e.confidence DESC, n.file_path, n.start_line
             """
-            cursor = conn.execute(query_sql, (symbol_name, symbol_name, symbol_name))
+            cursor = conn.execute(query_sql, (symbol_name, symbol_name, bare_name))
             caller_rows = cursor.fetchall()
 
         matched_callers = []
@@ -869,6 +1347,9 @@ class CodeGraphEngine:
             }
 
         conn = self._get_db()
+        # 按需提取函数体内部调用并建立拓扑边 (启发自 Zed)
+        self._resolve_callees_on_demand(symbol_name)
+
         cursor = conn.execute(
             "SELECT id, symbol_name, qualified_name, file_path, start_line, docstring FROM nodes WHERE symbol_name = ? OR qualified_name = ? LIMIT 5",
             (symbol_name, symbol_name),
@@ -877,8 +1358,14 @@ class CodeGraphEngine:
         if not nodes and "." in symbol_name:
             short = symbol_name.split(".")[-1]
             cursor = conn.execute(
-                "SELECT id, symbol_name, qualified_name, file_path, start_line, docstring FROM nodes WHERE symbol_name = ? OR symbol_name LIKE ? LIMIT 5",
-                (short, f"%.{short}"),
+                "SELECT id, symbol_name, qualified_name, file_path, start_line, docstring FROM nodes WHERE symbol_name = ? OR symbol_name LIKE ? OR qualified_name LIKE ? LIMIT 5",
+                (short, f"%.{short}", f"%.{symbol_name}"),
+            )
+            nodes = cursor.fetchall()
+        elif not nodes:
+            cursor = conn.execute(
+                "SELECT id, symbol_name, qualified_name, file_path, start_line, docstring FROM nodes WHERE symbol_name LIKE ? OR qualified_name LIKE ? LIMIT 5",
+                (f"%.{symbol_name}", f"%.{symbol_name}"),
             )
             nodes = cursor.fetchall()
 
@@ -901,10 +1388,10 @@ class CodeGraphEngine:
                 n.chunk_type, n.start_line, n.docstring
             FROM resolved_edges e
             LEFT JOIN nodes n ON e.callee_id = n.id
-            WHERE e.caller_id = ? OR e.caller_symbol = ? OR e.caller_qualified = ?
+            WHERE e.caller_id = ? OR e.caller_symbol = ? OR e.caller_qualified = ? OR e.caller_symbol LIKE ?
             ORDER BY e.confidence DESC, e.call_name
             """,
-            (caller_node['id'], caller_node['symbol_name'], symbol_name),
+            (caller_node['id'], caller_node['symbol_name'], symbol_name, f"%.{symbol_name}"),
         )
         edge_rows = cursor.fetchall()
 
@@ -1009,6 +1496,7 @@ class CodeGraphEngine:
             if curr_sym in visited_symbols or depth >= max_depth:
                 continue
             visited_symbols.add(curr_sym)
+            self._resolve_callers_on_demand(curr_sym)
 
             cur_ids = [curr_id] if curr_id else []
             if not cur_ids:
@@ -1038,11 +1526,11 @@ class CodeGraphEngine:
                         n.route_info, e.is_dynamic, e.dynamic_expr, e.resolution_type, e.confidence
                     FROM resolved_edges e
                     JOIN nodes n ON e.caller_id = n.id
-                    WHERE (e.callee_id IN ({id_ph}) OR e.callee_symbol = ? OR e.call_name = ?)
+                    WHERE (e.callee_id IN ({id_ph}) OR e.callee_qualified = ?)
                       AND e.confidence >= 0.25
                       AND e.resolution_type != 'EXTERNAL'
                 """
-                cursor = conn.execute(query_sql, cur_ids + [curr_sym, curr_sym])
+                cursor = conn.execute(query_sql, cur_ids + [curr_sym])
                 callers = cursor.fetchall()
             else:
                 query_sql = """
@@ -1059,6 +1547,10 @@ class CodeGraphEngine:
                 callers = cursor.fetchall()
 
             for c in callers:
+                # 忽略整文件虚块与纯文本块，仅追踪结构化实体
+                if c['chunk_type'] == 'file' or c['symbol_name'].startswith('['):
+                    continue
+
                 impacted_files.add(c['file_path'])
                 item = {
                     "depth": depth + 1,
@@ -1086,8 +1578,9 @@ class CodeGraphEngine:
                         }
                     )
 
-                if c['symbol_name'] not in visited_symbols:
-                    queue.append((c['symbol_name'], depth + 1, path + [c['symbol_name']], c['id']))
+                if c['symbol_name'] not in visited_symbols and (depth + 1) < max_depth:
+                    if len(queue) < 100:
+                        queue.append((c['symbol_name'], depth + 1, path + [c['symbol_name']], c['id']))
 
         return {
             "status": "success",
@@ -1135,6 +1628,10 @@ class CodeGraphEngine:
         for depth in range(1, max_depth + 1):
             if not frontier:
                 break
+
+            # 按需解析本层所有符号的下游调用
+            for (_, sym, _) in frontier:
+                self._resolve_callees_on_demand(sym)
 
             # 收集本层所有 caller_id（已知）与 caller_symbol（回退）
             ids_in_frontier: List[str] = [nid for (_, _, nid) in frontier if nid]

@@ -69,27 +69,10 @@ def test_two_phase_resolution_pipeline():
 
         conn = graph._get_db()
         nodes_cnt = conn.execute("SELECT count(*) as c FROM nodes").fetchone()["c"]
-        calls_cnt = conn.execute("SELECT count(*) as c FROM calls").fetchone()["c"]
-        edges_cnt = conn.execute("SELECT count(*) as c FROM resolved_edges").fetchone()["c"]
-
-        print(f"📊 SQLite 统计: {nodes_cnt} 节点, {calls_cnt} 原始调用点, {edges_cnt} 条全局二次解析边")
+        print(f"📊 SQLite 统计: {nodes_cnt} 节点 (轻量级符号定义就绪)")
         assert nodes_cnt >= 6
-        assert calls_cnt >= 3
-        assert edges_cnt >= 3
 
-        # 1.1 检查 resolved_edges 表是否记录了高确信度的确定性边
-        edges = conn.execute("""
-            SELECT caller_symbol, caller_file, callee_symbol, callee_file, callee_qualified, call_name, resolution_type, confidence
-            FROM resolved_edges
-            WHERE resolution_type != 'EXTERNAL'
-            ORDER BY caller_symbol
-        """).fetchall()
-
-        print("\n🔍 抽检 resolved_edges 确定性边:")
-        for e in edges:
-            print(f"  • {e['caller_symbol']} -> {e['callee_symbol']} ({e['callee_file']}) | 类型: {e['resolution_type']} | 确信度: {e['confidence']}")
-
-        # 1.2 验证 Caller 1 (pkg_a/controller.py::run_a -> pkg_a/service.py::handle)
+        # 1.2 验证 Caller 1 (pkg_a/controller.py::run_a -> pkg_a/service.py::handle) 按需解析
         callees_a = graph.get_callees("run_a")
         assert callees_a["status"] == "success"
         callee_a = callees_a["callees"][0]
@@ -118,6 +101,13 @@ def test_two_phase_resolution_pipeline():
         assert callee_ambig["resolution_type"] == "AMBIGUOUS"
         assert callee_ambig["confidence"] < 0.8
         print("✅ Caller 3 跨模块通用重名歧义拦截与防串线验证通过！")
+
+        # 验证按需解析边已成功沉淀入 SQLite 缓存
+        calls_cnt = conn.execute("SELECT count(*) as c FROM calls").fetchone()["c"]
+        edges_cnt = conn.execute("SELECT count(*) as c FROM resolved_edges").fetchone()["c"]
+        print(f"📊 按需解析后 SQLite 拓扑统计: {calls_cnt} 原始调用点, {edges_cnt} 条确定性二次解析边")
+        assert calls_cnt >= 3
+        assert edges_cnt >= 3
 
         # 1.5 验证调用方反向查询 (get_callers 防串线隔离验证)
         # 查 pkg_a 的 handle: 只能被 run_a 调用，绝不能出现 run_b

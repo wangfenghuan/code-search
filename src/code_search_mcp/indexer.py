@@ -104,7 +104,7 @@ class UniversalCodeChunker:
     """基于 Tree-sitter 的多语言统一切片器"""
 
     def __init__(self, repo_root: Path):
-        self.repo_root = repo_root
+        self.repo_root = Path(repo_root).resolve()
         self.ts_parser = TreeSitterParser()
 
     def _fallback_text_chunks(self, file_path: Path, rel_path: str, lang: str) -> List[CodeChunk]:
@@ -148,7 +148,7 @@ class UniversalCodeChunker:
                 CodeChunk(
                     id=str(uuid.uuid4()),
                     file_path=rel_path,
-                    full_path=str(file_path),
+                    full_path=str(file_path.resolve()),
                     language=lang,
                     symbol_name=part_name,
                     chunk_type="text_window",
@@ -169,9 +169,9 @@ class UniversalCodeChunker:
                 break
         return chunks
 
-    def parse_file(self, file_path: Path) -> List[CodeChunk]:
+    def parse_file(self, file_path: Path, include_calls: bool = False) -> List[CodeChunk]:
         try:
-            rel_path = str(file_path.relative_to(self.repo_root)).replace("\\", "/")
+            rel_path = str(file_path.resolve().relative_to(self.repo_root)).replace("\\", "/")
         except ValueError:
             rel_path = str(file_path).replace("\\", "/")
 
@@ -187,9 +187,9 @@ class UniversalCodeChunker:
         if file_size > 1024 * 1024:
             return self._fallback_text_chunks(file_path, rel_path, lang)
 
-        # 2. 安全调用 AST 解析，任何异常安全降级
+        # 2. 安全调用 AST 解析，任何异常安全降级 (默认轻量符号定义提取，跳过调用边遍历)
         try:
-            symbols = self.ts_parser.parse_file(file_path, rel_path=rel_path)
+            symbols = self.ts_parser.parse_file(file_path, rel_path=rel_path, include_calls=include_calls)
         except Exception as e:
             sys.stderr.write(f"[code-search-mcp] AST 解析异常，降级为文本分块 {rel_path}: {e}\n")
             return self._fallback_text_chunks(file_path, rel_path, lang)
