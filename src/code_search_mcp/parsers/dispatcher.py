@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from tree_sitter import Node, Parser, QueryCursor
 
 from .common import (
+    BaseLanguageParser,
     EXTENSION_LANG_MAP,
     FileImports,
     GO_LANG,
@@ -13,6 +14,7 @@ from .common import (
     JS_LANG,
     PY_LANG,
     ParsedSymbol,
+    RUST_LANG,
     TS_LANG,
     extract_route_from_text,
     get_module_name_from_path,
@@ -21,6 +23,7 @@ from .go import GoParser
 from .java import JavaParser
 from .javascript import TSJSParser
 from .python import PythonParser
+from .rust import RustParser
 
 
 class TreeSitterParser:
@@ -50,14 +53,27 @@ class TreeSitterParser:
             self._parsers["go"] = Parser(GO_LANG)
         if JAVA_LANG:
             self._parsers["java"] = Parser(JAVA_LANG)
+        if RUST_LANG:
+            self._parsers["rust"] = Parser(RUST_LANG)
 
         # 实例化各语言独立解析器
         self.py_parser = PythonParser()
         self.tsjs_parser = TSJSParser()
         self.go_parser = GoParser()
         self.java_parser = JavaParser()
+        self.rust_parser = RustParser()
 
-        # 兼容性属性桥接 (供外部或旧代码访问底层 Query)
+        # 语言解析器统一映射表 (纯分发调度体系)
+        self._sub_parsers: Dict[str, BaseLanguageParser] = {
+            "python": self.py_parser,
+            "javascript": self.tsjs_parser,
+            "typescript": self.tsjs_parser,
+            "go": self.go_parser,
+            "java": self.java_parser,
+            "rust": self.rust_parser,
+        }
+
+        # 兼容性属性桥接 (供外部或历史代码访问底层 Query)
         self._py_class_query = self.py_parser.class_query
         self._py_fn_query = self.py_parser.fn_query
         self._py_calls_query = self.py_parser.calls_query
@@ -79,10 +95,14 @@ class TreeSitterParser:
         self._java_calls_query = self.java_parser.calls_query
         self._java_fields_query = self.java_parser.fields_query
 
+        self._rust_types_query = self.rust_parser.types_query
+        self._rust_fn_query = self.rust_parser.fn_query
+        self._rust_calls_query = self.rust_parser.calls_query
+
     def is_supported(self, file_path: Path) -> bool:
         ext = file_path.suffix.lower()
         lang = EXTENSION_LANG_MAP.get(ext)
-        return lang in self._parsers
+        return bool(lang and lang in self._parsers)
 
     def extract_calls_from_code(
         self,
@@ -92,36 +112,17 @@ class TreeSitterParser:
         module_name: str = "",
     ) -> List[str]:
         """按需从单段代码中快速提取所有调用的符号名 (微秒级单片段分析，用于按需 Callee 查询)"""
-        if not code or lang not in self._parsers:
+        if not code or lang not in self._parsers or lang not in self._sub_parsers:
+            return []
+        sub_parser = self._sub_parsers[lang]
+        calls_query = getattr(sub_parser, "calls_query", None) or getattr(sub_parser, "ts_calls_query", None)
+        if not calls_query:
             return []
         source_bytes = code.encode("utf-8") if isinstance(code, str) else code
-        parser = self._parsers[lang]
-        tree = parser.parse(source_bytes)
-        root = tree.root_node
-
-        query_map = {
-            "python": self._py_calls_query,
-            "typescript": self._ts_calls_query,
-            "javascript": self._js_calls_query,
-            "go": self._go_calls_query,
-            "java": self._java_calls_query,
-        }
-        query = query_map.get(lang)
-        if not query:
-            del tree
-            return []
-        cursor = QueryCursor(query)
-        matches = cursor.matches(root)
-        if lang == "python":
-            calls = self.py_parser.extract_calls_from_matches(matches, source_bytes, imports, module_name, "")
-        elif lang in ("typescript", "javascript"):
-            calls = self.tsjs_parser.extract_calls_from_matches(matches, source_bytes, imports, module_name, "")
-        elif lang == "go":
-            calls = self.go_parser.extract_calls_from_matches(matches, source_bytes, imports, module_name)
-        elif lang == "java":
-            calls = self.java_parser.extract_calls_from_matches(matches, source_bytes, imports, module_name, "")
-        else:
-            calls = []
+        tree = self._parsers[lang].parse(source_bytes)
+        cursor = QueryCursor(calls_query)
+        matches = cursor.matches(tree.root_node)
+        calls = sub_parser.extract_calls_from_matches(matches, source_bytes, imports, module_name)
         del cursor
         del tree
         return calls
@@ -137,11 +138,12 @@ class TreeSitterParser:
         if not lang:
             ext = Path(file_name).suffix.lower()
             lang = EXTENSION_LANG_MAP.get(ext)
-        if not lang or lang not in self._parsers:
+        if not lang or lang not in self._parsers or lang not in self._sub_parsers:
             return []
         if not source_bytes.strip():
             return []
 
+        sub_parser = self._sub_parsers[lang]
         parser = self._parsers[lang]
         tree = parser.parse(source_bytes)
         root = tree.root_node
@@ -152,54 +154,20 @@ class TreeSitterParser:
             return bisect.bisect_right(line_starts, b)
 
         module_name = get_module_name_from_path(file_name)
-        imports = self._extract_imports(root, source_bytes, lang) if include_calls else None
+        imports = sub_parser.extract_imports(root, source_bytes) if include_calls else None
         symbols: List[ParsedSymbol] = []
 
-        if lang == "python":
-            self.py_parser.parse(
-                tree,
-                source_bytes,
-                symbols,
-                imports=imports,
-                module_name=module_name,
-                file_path=file_name,
-                byte_to_line=byte_to_line,
-                include_calls=include_calls,
-            )
-        elif lang in ("typescript", "javascript"):
-            self.tsjs_parser.parse(
-                tree,
-                source_bytes,
-                symbols,
-                imports=imports,
-                module_name=module_name,
-                file_path=file_name,
-                byte_to_line=byte_to_line,
-                lang=lang,
-                include_calls=include_calls,
-            )
-        elif lang == "go":
-            self.go_parser.parse(
-                tree,
-                source_bytes,
-                symbols,
-                imports=imports,
-                module_name=module_name,
-                file_path=file_name,
-                byte_to_line=byte_to_line,
-                include_calls=include_calls,
-            )
-        elif lang == "java":
-            self.java_parser.parse(
-                tree,
-                source_bytes,
-                symbols,
-                imports=imports,
-                module_name=module_name,
-                file_path=file_name,
-                byte_to_line=byte_to_line,
-                include_calls=include_calls,
-            )
+        sub_parser.parse(
+            tree,
+            source_bytes,
+            symbols,
+            imports=imports,
+            module_name=module_name,
+            file_path=file_name,
+            byte_to_line=byte_to_line,
+            include_calls=include_calls,
+            lang=lang,
+        )
 
         del tree
         return symbols
@@ -224,29 +192,10 @@ class TreeSitterParser:
         path_for_module = rel_path if rel_path else file_path.as_posix()
         return self.parse_code(source_bytes, path_for_module, lang, include_calls=include_calls)
 
-    # 兼容性私有接口委托
+    # 纯委托辅助方法 (100% 保持历史方法兼容，同时消除冗余重复逻辑)
     def _extract_imports(self, root: Node, source: bytes, lang: str) -> FileImports:
-        if lang == "python":
-            return self.py_parser.extract_imports(root, source)
-        elif lang in ("typescript", "javascript"):
-            return self.tsjs_parser.extract_imports(root, source)
-        elif lang == "go":
-            return self.go_parser.extract_imports(root, source)
-        elif lang == "java":
-            return self.java_parser.extract_imports(root, source)
-        return FileImports()
-
-    def _extract_py_calls(self, matches, source: bytes, imports: Optional[FileImports], module_name: str, current_class: str) -> List[str]:
-        return self.py_parser.extract_calls_from_matches(matches, source, imports, module_name, current_class)
-
-    def _extract_ts_calls(self, matches, source: bytes, imports: Optional[FileImports], module_name: str, current_class: str) -> List[str]:
-        return self.tsjs_parser.extract_calls_from_matches(matches, source, imports, module_name, current_class)
-
-    def _extract_go_calls(self, matches, source: bytes, imports: Optional[FileImports], module_name: str) -> List[str]:
-        return self.go_parser.extract_calls_from_matches(matches, source, imports, module_name)
-
-    def _extract_java_calls(self, matches, source: bytes, imports: Optional[FileImports], module_name: str, current_class: str = "") -> List[str]:
-        return self.java_parser.extract_calls_from_matches(matches, source, imports, module_name, current_class)
+        sub = self._sub_parsers.get(lang)
+        return sub.extract_imports(root, source) if sub else FileImports()
 
     def _extract_calls(
         self,
@@ -257,31 +206,35 @@ class TreeSitterParser:
         current_module: str = "",
         current_class: str = "",
     ) -> List[str]:
-        query_map = {
-            "python": self._py_calls_query,
-            "typescript": self._ts_calls_query,
-            "javascript": self._ts_calls_query,
-            "go": self._go_calls_query,
-            "java": self._java_calls_query,
-        }
-        query = query_map.get(lang)
-        if not query:
+        sub = self._sub_parsers.get(lang)
+        if not sub:
             return []
-        cursor = QueryCursor(query)
+        calls_query = getattr(sub, "calls_query", None) or getattr(sub, "ts_calls_query", None)
+        if not calls_query:
+            return []
+        cursor = QueryCursor(calls_query)
         cursor.set_byte_range(int(node.start_byte), int(node.end_byte))
         matches = cursor.matches(node)
-        if lang == "python":
-            calls = self.py_parser.extract_calls_from_matches(matches, source, imports, current_module, current_class)
-        elif lang in ("typescript", "javascript"):
-            calls = self.tsjs_parser.extract_calls_from_matches(matches, source, imports, current_module, current_class)
-        elif lang == "go":
-            calls = self.go_parser.extract_calls_from_matches(matches, source, imports, current_module)
-        elif lang == "java":
-            calls = self.java_parser.extract_calls_from_matches(matches, source, imports, current_module, current_class)
-        else:
-            calls = []
+        calls = sub.extract_calls_from_matches(
+            matches, source, imports=imports, module_name=current_module, current_class=current_class
+        )
         del cursor
         return calls
+
+    def _extract_py_calls(self, *args, **kwargs) -> List[str]:
+        return self.py_parser.extract_calls_from_matches(*args, **kwargs)
+
+    def _extract_ts_calls(self, *args, **kwargs) -> List[str]:
+        return self.tsjs_parser.extract_calls_from_matches(*args, **kwargs)
+
+    def _extract_go_calls(self, *args, **kwargs) -> List[str]:
+        return self.go_parser.extract_calls_from_matches(*args, **kwargs)
+
+    def _extract_java_calls(self, *args, **kwargs) -> List[str]:
+        return self.java_parser.extract_calls_from_matches(*args, **kwargs)
+
+    def _extract_rust_calls(self, *args, **kwargs) -> List[str]:
+        return self.rust_parser.extract_calls_from_matches(*args, **kwargs)
 
     def _extract_route_from_text(self, text: str) -> str:
         return extract_route_from_text(text)
@@ -297,3 +250,6 @@ class TreeSitterParser:
 
     def _parse_java(self, *args, **kwargs):
         return self.java_parser.parse(*args, **kwargs)
+
+    def _parse_rust(self, *args, **kwargs):
+        return self.rust_parser.parse(*args, **kwargs)

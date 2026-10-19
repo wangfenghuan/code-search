@@ -9,6 +9,7 @@ from .common import (
     FileImports,
     JAVA_BUILTINS,
     JAVA_LANG,
+    JDK_PACKAGE_PREFIXES,
     ParsedSymbol,
     extract_route_from_text,
     get_leading_comment,
@@ -85,7 +86,12 @@ class JavaParser(BaseLanguageParser):
                 fn = get_node_text(cap["field.name"][0], source).strip()
                 ft = get_node_text(cap["field.type"][0], source).strip()
                 clean_ft = re.sub(r"<.*>|\[.*\]", "", ft).strip()
-                if fn and clean_ft:
+                if (
+                    fn
+                    and clean_ft
+                    and clean_ft not in JAVA_BUILTINS
+                    and not clean_ft.startswith(JDK_PACKAGE_PREFIXES)
+                ):
                     file_imports.instances[fn] = clean_ft
             del cursor_f
 
@@ -106,6 +112,8 @@ class JavaParser(BaseLanguageParser):
             call_names = []
             if "call.name" in cap:
                 bare_name = get_node_text(cap["call.name"][0], source).strip()
+                if not bare_name or bare_name in JAVA_BUILTINS:
+                    continue
                 call_names.append(bare_name)
                 if "call.obj" in cap:
                     obj_text = get_node_text(cap["call.obj"][0], source).strip()
@@ -128,7 +136,8 @@ class JavaParser(BaseLanguageParser):
                         mod = imports.modules[obj_text]
                         call_names.append(f"{mod}.{bare_name}")
                     else:
-                        call_names.append(f"{obj_text}.{bare_name}")
+                        # 局部变量方法调用（不知道类型），只保留短名 bare_name，不做限定名推断
+                        pass
                 else:
                     if current_class:
                         call_names.append(f"{current_class}.{bare_name}")
@@ -139,15 +148,31 @@ class JavaParser(BaseLanguageParser):
             elif "call.type" in cap:
                 raw_type = get_node_text(cap["call.type"][0], source).strip()
                 clean_type = re.sub(r"<.*>|\[.*\]", "", raw_type).strip()
-                if clean_type:
-                    call_names.append(clean_type)
-                    if imports and clean_type in imports.symbols:
-                        call_names.append(imports.symbols[clean_type])
-                    elif module_name:
-                        call_names.append(f"{module_name}.{clean_type}")
+                if (
+                    clean_type
+                    and clean_type not in JAVA_BUILTINS
+                    and not clean_type.startswith(JDK_PACKAGE_PREFIXES)
+                ):
+                    resolved_sym = (
+                        imports.symbols[clean_type]
+                        if (imports and clean_type in imports.symbols)
+                        else None
+                    )
+                    if resolved_sym:
+                        if not resolved_sym.startswith(JDK_PACKAGE_PREFIXES):
+                            call_names.append(resolved_sym)
+                    else:
+                        call_names.append(clean_type)
+                        if module_name:
+                            call_names.append(f"{module_name}.{clean_type}")
 
             for name in call_names:
-                if name and name not in JAVA_BUILTINS and name not in seen:
+                if (
+                    name
+                    and name not in JAVA_BUILTINS
+                    and not name.startswith(JDK_PACKAGE_PREFIXES)
+                    and name not in seen
+                ):
                     seen.add(name)
                     calls.append(name)
         return calls

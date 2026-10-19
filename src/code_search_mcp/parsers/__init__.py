@@ -21,6 +21,8 @@ from .common import (
     LANG_BUILTINS,
     PY_LANG,
     PYTHON_BUILTINS,
+    RUST_BUILTINS,
+    RUST_LANG,
     TS_LANG,
     TSX_LANG,
     BaseLanguageParser,
@@ -36,6 +38,7 @@ from .go import GoParser
 from .java import JavaParser
 from .javascript import TSJSParser
 from .python import PythonParser
+from .rust import RustParser
 
 __all__ = [
     "TreeSitterParser",
@@ -44,6 +47,7 @@ __all__ = [
     "TSJSParser",
     "GoParser",
     "JavaParser",
+    "RustParser",
     "ParsedSymbol",
     "FileImports",
     "EXTENSION_LANG_MAP",
@@ -53,12 +57,14 @@ __all__ = [
     "JS_BUILTINS",
     "GO_BUILTINS",
     "JAVA_BUILTINS",
+    "RUST_BUILTINS",
     "PY_LANG",
     "JS_LANG",
     "TS_LANG",
     "TSX_LANG",
     "GO_LANG",
     "JAVA_LANG",
+    "RUST_LANG",
     "get_node_text",
     "get_leading_comment",
     "get_module_name_from_path",

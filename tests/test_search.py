@@ -56,7 +56,7 @@ def test_multilang_tree_sitter():
     assert "OrderManager.CreateOrder" in go_names
     assert "OrderManager.CancelOrder" in go_names
 
-    # 1.4 Java 测试 (Spring Boot REST 控制器与服务)
+    # 1.4 Java 测试 (Spring Boot REST 控制器与服务、调用过滤)
     java_symbols = parser.parse_file(sample_dir / "UserController.java", include_calls=True)
     java_names = [s.name for s in java_symbols]
     print(f"Java 提取符号: {java_names}")
@@ -67,6 +67,28 @@ def test_multilang_tree_sitter():
     get_users = next(s for s in java_symbols if s.name == "UserController.getUsers")
     assert get_users.route_info == "HTTP GET /api/v1/users"
     assert any("UserService.findAll" in c for c in get_users.calls)
+
+    # 验证 Java 过滤 JDK 标准库与局部变量调用误报
+    user_svc_symbols = parser.parse_file(sample_dir / "UserService.java", include_calls=True)
+    find_all = next(s for s in user_svc_symbols if s.name == "UserService.findAll")
+    assert not any("java.util" in c for c in find_all.calls)
+    assert not any("users.add" in c for c in find_all.calls)
+
+    # 1.5 Rust 测试 (Actix-web 路由、结构体、枚举与调用图)
+    rust_symbols = parser.parse_file(sample_dir / "order_service.rs", include_calls=True)
+    rust_names = [s.name for s in rust_symbols]
+    print(f"Rust 提取符号: {rust_names}")
+    assert "OrderService" in rust_names
+    assert "OrderStatus" in rust_names
+    assert "OrderProcessor" in rust_names
+    assert "OrderService.new" in rust_names
+    assert "OrderService.get_order" in rust_names
+    assert "OrderService.create_order" in rust_names
+    assert "notify_order_created" in rust_names
+    get_order = next(s for s in rust_symbols if s.name == "OrderService.get_order")
+    assert get_order.route_info == "HTTP GET /api/v1/orders"
+    create_order = next(s for s in rust_symbols if s.name == "OrderService.create_order")
+    assert any("notify_order_created" in c for c in create_order.calls)
 
     print("✅ Tree-sitter 多语言语法解析 100% 通过！")
 
@@ -80,14 +102,16 @@ def test_outline_generation():
     print("多语言项目大纲 Markdown 预览:")
     print(md[:450] + "\n...")
 
-    assert outline["total_modules"] >= 4
+    assert outline["total_modules"] >= 5
     assert "[typescript]" in md
     assert "[go]" in md
     assert "[python]" in md
     assert "[java]" in md
+    assert "[rust]" in md
     assert "PaymentGateway" in md
     assert "OrderManager" in md
     assert "UserController" in md
+    assert "OrderService" in md
     print("✅ 多语言架构大纲生成通过！")
 
 

@@ -52,12 +52,29 @@ JAVA_BUILTINS: Set[str] = {
     "length", "charAt", "substring", "indexOf", "lastIndexOf", "startsWith", "endsWith", "replace",
     "replaceAll", "trim", "strip", "toLowerCase", "toUpperCase", "split", "join", "format", "matches",
     "print", "println", "printf", "currentTimeMillis", "nanoTime", "arraycopy", "exit", "gc",
-    "start", "run", "sleep", "join", "interrupt", "isAlive",
+    "start", "run", "sleep", "join", "interrupt", "isAlive", "append", "close", "flush", "read", "write",
+    "builder", "build",
     "String", "Integer", "Long", "Double", "Float", "Boolean", "Byte", "Short", "Character",
     "Object", "Class", "System", "Math", "Arrays", "Collections", "Objects", "Optional",
     "List", "ArrayList", "LinkedList", "Set", "HashSet", "TreeSet", "Map", "HashMap", "TreeMap",
     "Exception", "RuntimeException", "IllegalArgumentException", "NullPointerException",
     "IllegalStateException", "IndexOutOfBoundsException", "UnsupportedOperationException",
+}
+
+JDK_PACKAGE_PREFIXES = (
+    "java.", "javax.", "sun.", "jdk.", "com.sun.",
+    "org.w3c.", "org.xml.", "org.slf4j.", "org.apache.commons.",
+)
+
+RUST_BUILTINS: Set[str] = {
+    "println", "print", "eprintln", "eprint", "format", "panic", "vec", "assert",
+    "assert_eq", "assert_ne", "dbg", "todo", "unimplemented", "unreachable",
+    "clone", "to_string", "as_str", "as_bytes", "len", "is_empty", "unwrap",
+    "expect", "unwrap_or", "unwrap_or_else", "unwrap_or_default", "map",
+    "and_then", "or_else", "ok", "err", "is_ok", "is_err", "push", "pop",
+    "insert", "remove", "get", "get_mut", "iter", "into_iter", "collect",
+    "Some", "None", "Ok", "Err", "Box", "Rc", "Arc", "RefCell", "Mutex",
+    "String", "Vec", "Option", "Result", "Default", "default", "new",
 }
 
 LANG_BUILTINS: Dict[str, Set[str]] = {
@@ -66,9 +83,10 @@ LANG_BUILTINS: Dict[str, Set[str]] = {
     "typescript": JS_BUILTINS,
     "go": GO_BUILTINS,
     "java": JAVA_BUILTINS,
+    "rust": RUST_BUILTINS,
 }
 
-BUILTIN_CALLS: Set[str] = PYTHON_BUILTINS | JS_BUILTINS | GO_BUILTINS | JAVA_BUILTINS
+BUILTIN_CALLS: Set[str] = PYTHON_BUILTINS | JS_BUILTINS | GO_BUILTINS | JAVA_BUILTINS | RUST_BUILTINS
 
 
 # 导入语言包
@@ -104,6 +122,12 @@ try:
 except Exception:
     JAVA_LANG = None
 
+try:
+    import tree_sitter_rust as tsrust
+    RUST_LANG = Language(tsrust.language())
+except Exception:
+    RUST_LANG = None
+
 
 # 扩展名到语言的映射
 EXTENSION_LANG_MAP: Dict[str, str] = {
@@ -116,6 +140,7 @@ EXTENSION_LANG_MAP: Dict[str, str] = {
     ".tsx": "typescript",
     ".go": "go",
     ".java": "java",
+    ".rs": "rust",
 }
 
 
@@ -195,6 +220,11 @@ def extract_route_from_text(text: str) -> str:
     if m_req:
         method = m_req.group(2).upper() if m_req.group(2) else "GET"
         return f"HTTP {method} {m_req.group(1)}"
+
+    # Rust Actix-web / Rocket: #[get("/orders")], #[post("/orders")]
+    m_rust = re.search(r"#\[(get|post|put|delete|patch|options|head)\s*\(\s*['\"]([^'\"]+)['\"]", text, re.I)
+    if m_rust:
+        return f"HTTP {m_rust.group(1).upper()} {m_rust.group(2)}"
 
     # Python / NestJS: @router.post("/login"), @Post('/auth')
     m = re.search(r"@(?:router|app|\w+)?\.?(get|post|put|delete|patch)\s*\(\s*['\"]([^'\"]+)['\"]", text, re.I)
