@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -658,6 +659,100 @@ class PaymentRouter {
     print("✅ SQLite 按需图引擎索引与秒级查询验证通过！")
 
 
+def test_identifier_splitting_and_rrf():
+    print("\n--- 13. 测试标识符拆词注入（Camel/Snake Case）与多路 RRF 归一化融合 ---")
+    from code_search_mcp.indexer import CodeIndexer, build_enriched_text
+    from code_search_mcp.searcher import CodeSearcher
+    from code_search_mcp.text_utils import (
+        expand_query_with_splits,
+        extract_natural_words_from_identifiers,
+        split_camel_snake_case,
+    )
+
+    # 1. 验证 Camel/Snake Case 拆词算法
+    words_snake = split_camel_snake_case("verify_jwt_token_signature")
+    assert words_snake == ["verify", "jwt", "token", "signature"]
+
+    words_camel = split_camel_snake_case("verifyJwtTokenSignature")
+    assert words_camel == ["verify", "jwt", "token", "signature"]
+
+    words_pascal = split_camel_snake_case("UserProfileManager")
+    assert words_pascal == ["user", "profile", "manager"]
+
+    words_acronym = split_camel_snake_case("getHTTPResponseCode")
+    assert words_acronym == ["get", "http", "response", "code"]
+    print("✅ 1. 标识符 Camel/Snake/Pascal/Acronym 拆词精准测试通过！")
+
+    # 2. 验证查询语句自动展开
+    exp1 = expand_query_with_splits("verify_jwt_token 鉴权")
+    assert "verify jwt token" in exp1
+    exp2 = expand_query_with_splits("verifyJwtTokenSignature")
+    assert "verify jwt token signature" in exp2
+    print("✅ 2. 查询语句自动自然语言拆词展开测试通过！")
+
+    # 3. 验证 build_enriched_text 拆词注入且不改变原始源码
+    raw_code = "def verify_jwt_token_signature(req):\n    return check_token(req.token)"
+    enriched = build_enriched_text(
+        rel_path="auth/jwt.py",
+        language="python",
+        symbol_name="verify_jwt_token_signature",
+        chunk_type="function",
+        signature="(req)",
+        docstring="验证 JWT 签名合法性",
+        route_info="",
+        decorators="",
+        code=raw_code,
+        module_name="auth.jwt",
+    )
+    assert "标识符自然语言拆词: verify jwt token signature" in enriched
+    assert "def verify_jwt_token_signature(req):" in enriched
+    assert raw_code in enriched  # 源码保持原汁原味
+    print("✅ 3. 向量化富化文本拆词注入且源码不改变验证通过！")
+
+    # 4. 验证端到端多路 RRF 倒数排名融合检索 (LanceDB 向量 + Ripgrep 符号 + AST 路由结构)
+    test_repo = ROOT_DIR / "tests" / "test_rrf_repo"
+    shutil.rmtree(test_repo, ignore_errors=True)
+    test_repo.mkdir(parents=True, exist_ok=True)
+    try:
+        # 创建包含复杂长标识符代码文件
+        jwt_py = test_repo / "security_jwt.py"
+        jwt_py.write_text(
+            '"""JWT 核心安全签名验证模块"""\n\n'
+            "def verify_jwt_token_signature(request_token: str):\n"
+            '    """验证并校验客户端 JWT 签名的合法性与有效期"""\n'
+            '    return True\n\n'
+            "def handle_unrelated_job():\n"
+            '    """无关的定时任务处理"""\n'
+            '    pass\n',
+            encoding="utf-8",
+        )
+
+        indexer = CodeIndexer(test_repo)
+        indexer.index_all()
+
+        searcher = CodeSearcher(test_repo)
+        assert searcher.is_indexed()
+
+        # 中文自然语言提问 "JWT 签名校验"
+        results_zh = searcher.search("JWT 签名校验", top_k=2)
+        assert len(results_zh) > 0
+        top_match = results_zh[0]
+        assert top_match["symbol_name"] == "verify_jwt_token_signature"
+        assert 0.0 < top_match["similarity"] <= 1.0
+        print(f"  命中结果: {top_match['symbol_name']} (RRF 归一化得分: {top_match['similarity']})")
+
+        # 英文长标识符提问 "verifyJwtTokenSignature"
+        results_en = searcher.search("verifyJwtTokenSignature", top_k=2)
+        assert len(results_en) > 0
+        assert results_en[0]["symbol_name"] == "verify_jwt_token_signature"
+        assert 0.0 < results_en[0]["similarity"] <= 1.0
+        print(f"  英文标识符命中: {results_en[0]['symbol_name']} (RRF 归一化得分: {results_en[0]['similarity']})")
+
+        print("✅ 4. 多路 RRF (向量 + Ripgrep + AST) 统一归一化检索验证 100% 通过！")
+    finally:
+        shutil.rmtree(test_repo, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_multilang_tree_sitter()
     test_outline_generation()
@@ -671,5 +766,7 @@ if __name__ == "__main__":
     test_phase2_fixes()
     test_phase3_fixes()
     test_dynamic_calls_and_sqlite_engine()
+    test_identifier_splitting_and_rrf()
     print("\n🎉 全部单元与端到端测试 100% 全部通过！")
+
 

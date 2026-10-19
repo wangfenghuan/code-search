@@ -24,6 +24,7 @@ from code_search_mcp.config import (
 from code_search_mcp.embeddings import EmbeddingEngine
 from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser, get_module_name_from_path
 from code_search_mcp.outline import ProjectOutlineGenerator
+from code_search_mcp.text_utils import extract_natural_words_from_identifiers
 def _create_fts_index_safe(table, field_name: str = "enriched_text"):
     """安全创建全文检索 FTS 索引，优先使用 LanceDB 现代 FTS 配置 API，消除 DeprecatedWarning"""
     try:
@@ -87,6 +88,14 @@ def build_enriched_text(
         lines.append(f"参数签名: {signature}")
     if docstring:
         lines.append(f"功能文档说明: {docstring.strip()}")
+
+    # 标识符自然语言拆词注入（Camel/Snake Case Splitting）：
+    # 自动将 verifyJwtTokenSignature 或 verify_jwt_token 拆解为自然语言词组 verify jwt token signature
+    # 消除 bge-small-zh 将英文长标识符切碎成无意义 sub-words 的问题（仅用于向量富化，不改变展示源码）
+    split_words = extract_natural_words_from_identifiers(symbol_name, route_info, signature, code[:300])
+    if split_words:
+        lines.append(f"标识符自然语言拆词: {' '.join(split_words)}")
+
     lines.append("实现代码:")
 
     # 保护超长代码，保留头部和尾部核心上下文

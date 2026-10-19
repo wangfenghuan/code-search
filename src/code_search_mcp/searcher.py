@@ -4,7 +4,7 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import lancedb
 
@@ -15,6 +15,12 @@ from code_search_mcp.config import (
     get_repo_db_path,
 )
 from code_search_mcp.embeddings import EmbeddingEngine
+from code_search_mcp.ripgrep_engine import ExactSearchEngine
+from code_search_mcp.text_utils import (
+    expand_query_with_splits,
+    extract_natural_words_from_identifiers,
+    split_camel_snake_case,
+)
 
 
 def resolve_repo_path(repo_path: Optional[str] = None) -> Optional[Path]:
@@ -48,72 +54,64 @@ def resolve_repo_path(repo_path: Optional[str] = None) -> Optional[Path]:
     return cwd
 
 
-def calculate_symbol_boost(query: str, symbol_name: str, file_path: str, route_info: str) -> float:
-    """计算精确符号、文件名与路由的关键词加权，用于提升中英文混合检索的准确度"""
-    boost = 0.0
-    q_lower = query.lower()
-    sym_lower = symbol_name.lower()
-    file_lower = file_path.lower()
-    route_lower = route_info.lower()
+def compute_ast_match_score(
+    query_lower: str,
+    query_tokens: List[str],
+    symbol_name: str,
+    route_info: str,
+    chunk_type: str,
+) -> float:
+    """计算代码块与查询的 AST 结构精确匹配得分 (用于 AST RRF 排名通道)"""
+    score = 0.0
+    sym_lower = (symbol_name or "").lower()
+    route_lower = (route_info or "").lower()
+    leaf_name = sym_lower.split(".")[-1]
 
-    # 提取 query 中的英文标识符
-    identifiers = re.findall(r"[a-zA-Z0-9_]{3,}", q_lower)
+    # 1. 符号名完全精确匹配
+    if sym_lower in query_tokens or query_lower == sym_lower:
+        score += 100.0
+    elif leaf_name in query_tokens:
+        score += 85.0
+    elif any(token in sym_lower for token in query_tokens if len(token) >= 3):
+        score += 60.0
 
-    # 1. 符号名精确包含检查
-    for ident in identifiers:
-        if ident == sym_lower:
-            boost += 0.40
-            break
-        elif sym_lower.startswith(f"{ident}.") or f".{ident}." in sym_lower or sym_lower.endswith(f".{ident}"):
-            boost += 0.35
-            break
-        elif ident in sym_lower:
-            boost += 0.25
-            break
-
-    # 2. 路由匹配加权（例如 query 含有 "post" 或 "/login"）
+    # 2. Web 接口路由完全或路径匹配
     if route_lower:
-        for ident in identifiers:
-            if ident in route_lower:
-                boost += 0.30
+        for token in query_tokens:
+            if len(token) >= 3 and token in route_lower:
+                score += 80.0
                 break
 
-    # 3. 文件名匹配加权
-    for ident in identifiers:
-        if ident in file_lower:
-            boost += 0.15
-            break
+    # 3. 类名/结构体/记录等核心类型定义匹配
+    if chunk_type in ("class", "struct", "record", "interface"):
+        if sym_lower in query_tokens or leaf_name in query_tokens:
+            score += 75.0
 
-    # 4. 中文关键词对常用符号的启发式对齐
-    chinese_map = {
-        "登录": ["login", "auth", "signin", "authenticate"],
-        "注册": ["register", "signup"],
-        "密码": ["password", "hasher", "passwd"],
-        "连接池": ["pool", "connection"],
-        "事务": ["transaction", "tx"],
-        "用户": ["user", "account"],
-        "支付": ["pay", "payment", "order"],
-        "登出": ["logout", "signout"],
-        "校验": ["verify", "validate", "check"],
-    }
+    # 4. 标识符自然语言拆词重合度匹配
+    sym_splits = split_camel_snake_case(symbol_name)
+    if sym_splits:
+        overlap = set(sym_splits) & set(query_tokens)
+        if overlap:
+            score += 40.0 * (len(overlap) / len(sym_splits))
 
-    for zh_kw, en_terms in chinese_map.items():
-        if zh_kw in q_lower:
-            for term in en_terms:
-                if term in sym_lower or term in file_lower:
-                    boost += 0.15
-                    break
+    return score
 
-    return min(boost, 0.50)
+
+def calculate_symbol_boost(query: str, symbol_name: str, file_path: str, route_info: str) -> float:
+    """保留兼容性接口：计算精确符号、文件名与路由的关键词匹配权重"""
+    q_tokens = extract_natural_words_from_identifiers(query)
+    score = compute_ast_match_score(query.lower(), q_tokens, symbol_name, route_info, "")
+    return min(score / 200.0, 0.50)
 
 
 class CodeSearcher:
-    """结合语义向量与精确符号加权的高准确度检索器"""
+    """结合语义向量、FTS 全文检索、ripgrep 符号检索与 AST 路由结构的多路 RRF 检索器"""
 
     def __init__(self, repo_path: str | Path):
         self.repo_path = Path(repo_path).resolve()
         self.db_path = get_repo_db_path(self.repo_path)
         self.embedding_engine = EmbeddingEngine.get_instance()
+        self.exact_engine = ExactSearchEngine(self.repo_path)
         # LanceDB 连接缓存：避免每次 search() 都重复执行 connect()+open_table() 磁盘 I/O
         self._lancedb_conn = None
         self._lancedb_table = None
@@ -157,105 +155,211 @@ class CodeSearcher:
             return False
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """执行工业级真正混合检索（Dense 向量 + BM25 全文检索）与 Reciprocal Rank Fusion (RRF) 重排"""
+        """执行工业级多路 RRF 倒数排名融合检索：
+        通道 1: LanceDB Dense 向量语义相似度召回
+        通道 2: LanceDB BM25 / FTS 全文检索召回
+        通道 3: 内置 ripgrep 确切代码符号匹配召回
+        通道 4: AST 路由与类名/函数名精确结构匹配
+
+        通过 RRF_Score = sum(1 / (k + rank_i)) 统一归一化，彻底摒弃手工调参的硬编码加权。
+        """
         if not self.is_indexed():
             return []
 
-        query_vec = self.embedding_engine.embed_query(query)
+        # 1. 查询文本标识符自然语言展开 (强化 bge-small-zh 对长标识符的捕捉)
+        expanded_query = expand_query_with_splits(query)
+        query_vec = self.embedding_engine.embed_query(expanded_query)
         if not query_vec:
             return []
 
         table = self._get_table()
-
         candidate_limit = max(top_k * 6, 40)
-        k_rrf = 60.0
-
-        # 1. 向量相似度召回 (Dense Retrieval)
-        dense_records = []
-        try:
-            dense_records = table.search(query_vec).limit(candidate_limit).to_list()
-        except Exception:
-            dense_records = []
-
-        # 2. BM25 / 全文检索召回 (Sparse FTS Retrieval)
-        sparse_records = []
-        try:
-            sparse_records = table.search(query, query_type="fts").limit(candidate_limit).to_list()
-        except Exception:
-            # 降级：若未建 FTS 索引或不支持，使用精确标识符 SQL 过滤作为词法召回
-            identifiers = re.findall(r"[a-zA-Z0-9_]{3,}", query.lower())
-            if identifiers:
-                ident_clauses = " OR ".join([f"lower(symbol_name) LIKE '%{ident}%' OR lower(route_info) LIKE '%{ident}%' OR lower(code) LIKE '%{ident}%'" for ident in identifiers[:4]])
-                try:
-                    sparse_records = table.search().where(ident_clauses).limit(candidate_limit).to_list()
-                except Exception:
-                    sparse_records = []
-
-        # 3. Reciprocal Rank Fusion (RRF) 融合计算
-        rrf_scores: Dict[str, float] = defaultdict(float)
         candidates_map: Dict[str, Dict[str, Any]] = {}
 
-        # 记录 Dense 排名得分
-        for rank, r in enumerate(dense_records):
-            cid = str(r.get("id"))
-            candidates_map[cid] = r
-            rrf_scores[cid] += 1.0 / (k_rrf + rank + 1)
+        # 提取 query 关键符号词集（包含原始与 Camel/Snake 拆解词）
+        raw_tokens = re.findall(r"[a-zA-Z0-9_]{2,}", query.lower())
+        split_tokens = []
+        for tok in raw_tokens:
+            split_tokens.extend(split_camel_snake_case(tok))
+        all_query_tokens = list(dict.fromkeys(raw_tokens + split_tokens))
 
-        # 记录 Sparse 排名得分
-        for rank, r in enumerate(sparse_records):
-            cid = str(r.get("id"))
-            if cid not in candidates_map:
+        # ---------------------------------------------------------
+        # 通道 1: Dense 向量语义相似度检索 (Vector Dense Channel)
+        # ---------------------------------------------------------
+        dense_rank: Dict[str, int] = {}
+        try:
+            dense_records = table.search(query_vec).limit(candidate_limit).to_list()
+            for r_idx, r in enumerate(dense_records):
+                cid = str(r.get("id"))
                 candidates_map[cid] = r
-            rrf_scores[cid] += 1.0 / (k_rrf + rank + 1)
+                dense_rank[cid] = r_idx
+        except Exception:
+            pass
 
-        # 4. 结合符号标识符/路由/领域词精确 boost 进行最终重排
-        scored_candidates = []
-        max_possible_rrf = (1.0 / (k_rrf + 1)) * 2  # 理想情况下两路同时排名第1
+        # ---------------------------------------------------------
+        # 通道 2: LanceDB BM25 / 全文检索 (Sparse FTS Channel)
+        # ---------------------------------------------------------
+        sparse_rank: Dict[str, int] = {}
+        try:
+            sparse_records = table.search(query, query_type="fts").limit(candidate_limit).to_list()
+            for s_idx, r in enumerate(sparse_records):
+                cid = str(r.get("id"))
+                if cid not in candidates_map:
+                    candidates_map[cid] = r
+                sparse_rank[cid] = s_idx
+        except Exception:
+            # 降级：若未建 FTS 索引或异常，使用精确标识符 SQL 过滤作为词法召回
+            if all_query_tokens:
+                ident_clauses = " OR ".join(
+                    [
+                        f"lower(symbol_name) LIKE '%{ident}%' OR lower(route_info) LIKE '%{ident}%' OR lower(code) LIKE '%{ident}%'"
+                        for ident in all_query_tokens[:4]
+                    ]
+                )
+                try:
+                    fallback_records = table.search().where(ident_clauses).limit(candidate_limit).to_list()
+                    for s_idx, r in enumerate(fallback_records):
+                        cid = str(r.get("id"))
+                        if cid not in candidates_map:
+                            candidates_map[cid] = r
+                        sparse_rank[cid] = s_idx
+                except Exception:
+                    pass
+
+        # ---------------------------------------------------------
+        # 通道 3: 内置 ripgrep 确切代码符号匹配 (Ripgrep Match Channel)
+        # ---------------------------------------------------------
+        ripgrep_rank: Dict[str, int] = {}
+        ripgrep_hits: Dict[str, int] = defaultdict(int)
+
+        rg_tokens: List[str] = [t for t in all_query_tokens if len(t) >= 3 and not t.isdigit()][:4]
+        for token in rg_tokens:
+            try:
+                rg_res = self.exact_engine.search(
+                    pattern=token,
+                    is_regex=False,
+                    case_sensitive=False,
+                    max_results=20,
+                )
+                for m in rg_res.get("matches", []):
+                    rel_file = m.get("file", "").replace("\\", "/")
+                    line_num = int(m.get("line_number", 0))
+                    if not rel_file or line_num <= 0:
+                        continue
+
+                    # 检查是否命中已有候选代码块
+                    matched_cid = None
+                    for cid, c in list(candidates_map.items()):
+                        c_file = c.get("file_path", "").replace("\\", "/")
+                        if c_file == rel_file and int(c.get("start_line", 0)) <= line_num <= int(c.get("end_line", 0)):
+                            matched_cid = cid
+                            break
+
+                    # 若 ripgrep 命中但尚未在候选池中，从 LanceDB 范围补全该代码块
+                    if not matched_cid:
+                        try:
+                            safe_file = rel_file.replace("'", "''")
+                            where_sql = f"file_path = '{safe_file}' AND start_line <= {line_num} AND end_line >= {line_num}"
+                            pulled = table.search().where(where_sql).limit(1).to_list()
+                            if pulled:
+                                matched_cid = str(pulled[0].get("id"))
+                                candidates_map[matched_cid] = pulled[0]
+                        except Exception:
+                            pass
+
+                    if matched_cid:
+                        ripgrep_hits[matched_cid] += 1
+            except Exception:
+                pass
+
+        if ripgrep_hits:
+            sorted_rg = sorted(ripgrep_hits.items(), key=lambda x: x[1], reverse=True)
+            for r_idx, (cid, _) in enumerate(sorted_rg):
+                ripgrep_rank[cid] = r_idx
+
+        # ---------------------------------------------------------
+        # 通道 4: AST 路由与类名/函数名精确匹配 (AST Match Channel)
+        # ---------------------------------------------------------
+        ast_rank: Dict[str, int] = {}
+        ast_scores: Dict[str, float] = {}
         for cid, r in candidates_map.items():
-            base_rrf = rrf_scores[cid]
+            s_name = r.get("symbol_name", "")
+            r_info = r.get("route_info", "")
+            c_type = r.get("chunk_type", "")
+            score = compute_ast_match_score(
+                query_lower=query.lower(),
+                query_tokens=all_query_tokens,
+                symbol_name=s_name,
+                route_info=r_info,
+                chunk_type=c_type,
+            )
+            if score > 0:
+                ast_scores[cid] = score
+
+        if ast_scores:
+            sorted_ast = sorted(ast_scores.items(), key=lambda x: x[1], reverse=True)
+            for a_idx, (cid, _) in enumerate(sorted_ast):
+                ast_rank[cid] = a_idx
+
+        # ---------------------------------------------------------
+        # 核心融合算法: Reciprocal Rank Fusion (RRF) 统一归一化
+        # RRF_Score = sum( 1 / (k + rank_i) )
+        # ---------------------------------------------------------
+        k_rrf = 60.0
+        active_channels = [ch for ch in (dense_rank, sparse_rank, ripgrep_rank, ast_rank) if ch]
+        num_active = len(active_channels) if active_channels else 1
+        max_possible_rrf = num_active * (1.0 / (k_rrf + 1.0))
+
+        rrf_scores: Dict[str, float] = defaultdict(float)
+        for ch in active_channels:
+            for cid, rank in ch.items():
+                rrf_scores[cid] += 1.0 / (k_rrf + rank + 1.0)
+
+        # ---------------------------------------------------------
+        # 生成最终检索结果（替代硬编码加权，返回统一归一化的 similarity）
+        # ---------------------------------------------------------
+        scored_candidates = []
+        for cid, r in candidates_map.items():
+            base_rrf = rrf_scores.get(cid, 0.0)
             norm_sim = min(base_rrf / max_possible_rrf, 1.0)
-
-            dist = r.get("_distance")
-            if dist is not None:
-                vec_sim = round(1.0 / (1.0 + float(dist)), 4)
-                combined_base = 0.6 * norm_sim + 0.4 * vec_sim
-            else:
-                combined_base = norm_sim * 0.85
-
-            symbol_name = r.get("symbol_name", "")
-            file_path = r.get("file_path", "")
-            route_info = r.get("route_info", "")
-
-            boost = calculate_symbol_boost(query, symbol_name, file_path, route_info)
-            final_score = round(min(combined_base * (1.0 + boost), 1.0), 4)
+            final_score = round(norm_sim, 4)
 
             scored_candidates.append(
                 {
-                    "file_path": file_path,
+                    "file_path": r.get("file_path", ""),
                     "full_path": r.get("full_path"),
                     "language": r.get("language", "code"),
-                    "symbol_name": symbol_name,
+                    "symbol_name": r.get("symbol_name", ""),
                     "chunk_type": r.get("chunk_type"),
                     "start_line": int(r.get("start_line", 1)),
                     "end_line": int(r.get("end_line", 1)),
                     "docstring": r.get("docstring", ""),
-                    "route_info": route_info,
+                    "route_info": r.get("route_info", ""),
                     "decorators": r.get("decorators", ""),
                     "similarity": final_score,
                     "code": r.get("code", ""),
+                    "_distance": r.get("_distance"),
                 }
             )
 
-        scored_candidates.sort(key=lambda x: x["similarity"], reverse=True)
+        scored_candidates.sort(
+            key=lambda x: (
+                x["similarity"],
+                -float(x["_distance"]) if x.get("_distance") is not None else 0.0,
+            ),
+            reverse=True,
+        )
         return scored_candidates[:top_k]
 
 
-def format_search_results(results: List[Dict[str, Any]], query: str, compact: bool = True) -> str:
-    """格式化输出，支持 compact 极省 Token 模式"""
+def format_search_results(results: List[Dict[str, Any]], query: str = "", compact: bool = True, full: bool = False) -> str:
+    """格式化检索结果供 MCP 或 CLI 输出，支持 compact 极省 Token 模式"""
     if not results:
-        return f"未能找到与 '{query}' 相关的代码片段。可能该代码库尚未索引，或无相关实现。"
+        q_tip = f"与 '{query}' " if query else ""
+        return f"未能找到{q_tip}相关的代码片段。可能该代码库尚未索引，或无相关实现。"
 
-    output_lines = [f"## 代码检索结果: \"{query}\" (找到 {len(results)} 个最相关代码块)\n"]
+    q_title = f": \"{query}\"" if query else ""
+    output_lines = [f"## 代码检索结果{q_title} (找到 {len(results)} 个最相关代码块，多路 RRF 倒数排名融合)\n"]
     for i, item in enumerate(results, start=1):
         rel_path = item["file_path"]
         symbol = item["symbol_name"]
@@ -281,13 +385,12 @@ def format_search_results(results: List[Dict[str, Any]], query: str, compact: bo
         code_lines = code.splitlines()
         total_lines = len(code_lines)
 
-        if compact and total_lines > 12:
-            # 紧凑模式：截取前 10 行并提示深入查看
+        if not full and compact and total_lines > 12:
             preview_code = "\n".join(code_lines[:10])
             output_lines.append(
-                f"```python\n{preview_code}\n# ... (剩余 {total_lines - 10} 行代码，调用 get_file_content 传入起始行 {start_l} 查看完整实现)\n```\n"
+                f"```{lang}\n{preview_code}\n# ... (剩余 {total_lines - 10} 行代码，调用 get_file_content 传入起始行 {start_l} 查看完整实现)\n```\n"
             )
         else:
-            output_lines.append(f"```python\n{code}\n```\n")
+            output_lines.append(f"```{lang}\n{code}\n```\n")
 
     return "\n".join(output_lines)
