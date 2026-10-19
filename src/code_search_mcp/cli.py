@@ -67,6 +67,22 @@ def main():
         default=".",
         help="代码库根目录路径（默认当前目录）",
     )
+    index_parser.add_argument(
+        "--skip-vector",
+        action="store_true",
+        help="跳过向量嵌入，仅构建 CodeGraph 结构调用图与架构大纲（超大仓库秒级索引，零内存压力）",
+    )
+    index_parser.add_argument(
+        "--force-vector",
+        action="store_true",
+        help="强制启用全量流式向量嵌入（即使仓库源文件数超过阈值）",
+    )
+    index_parser.add_argument(
+        "--threshold",
+        type=int,
+        default=2000,
+        help="自动切换轻量模式的文件数阈值（默认 2000）",
+    )
 
     # outline 子命令
     outline_parser = subparsers.add_parser("outline", help="查看代码库全局架构大纲地图")
@@ -209,7 +225,11 @@ def main():
         indexer = CodeIndexer(target)
         t0 = time.perf_counter()
         with console.status(f"[bold cyan]正在解析代码库并构建向量与 AST 索引 ({target.name})...[/bold cyan]", spinner="dots"):
-            res = indexer.index_all()
+            res = indexer.index_all(
+                skip_vector=args.skip_vector,
+                force_vector=args.force_vector,
+                vector_threshold=args.threshold,
+            )
         elapsed = time.perf_counter() - t0
         print_index_result(res, elapsed_seconds=elapsed)
 

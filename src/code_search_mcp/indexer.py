@@ -353,148 +353,184 @@ class CodeIndexer:
                     matched_files.append(Path(root) / file)
         return matched_files
 
-    def index_all(self, batch_size: int = 128) -> Dict[str, Any]:
-        """全量切片、提前预构建图谱、硬件加速向量化并存储至 LanceDB"""
+    def index_all(
+        self,
+        batch_size: int = 64,
+        skip_vector: bool = False,
+        force_vector: bool = False,
+        vector_threshold: int = 2000,
+    ) -> Dict[str, Any]:
+        """全量切片、真流式持久化至 SQLite (结构图谱) 与 LanceDB (向量库)，彻底解决超大仓库 OOM 137"""
         sys.stderr.write(f"[code-search-mcp] 开始扫描多语言代码库: {self.repo_path}\n")
         files = self.scan_files()
-        sys.stderr.write(f"[code-search-mcp] 找到 {len(files)} 个源文件 (Python/TS/JS/Go)\n")
+        file_count = len(files)
+        sys.stderr.write(f"[code-search-mcp] 找到 {file_count} 个多语言源文件\n")
+
+        # 超大代码库智能探测与降级
+        if file_count > vector_threshold and not force_vector and not skip_vector:
+            skip_vector = True
+            sys.stderr.write(
+                f"[code-search-mcp] ⚠️ 检测到大型代码库 (共 {file_count} 个源文件 > 阈值 {vector_threshold})。\n"
+                f"[code-search-mcp] 自动激活轻量结构化索引模式：构建架构大纲、CodeGraph 调用图谱 (SQLite) 与 ripgrep 确切检索，跳过耗时且高内存的向量嵌入以杜绝 OOM。\n"
+                f"[code-search-mcp] (若仍需全量向量搜索，可通过 CLI 参数 --force-vector 或 MCP 参数 force_vector=True 强制启用流式嵌入)\n"
+            )
+            sys.stderr.flush()
 
         # 生成并缓存全局架构大纲
         outline_gen = ProjectOutlineGenerator(self.repo_path)
         outline_gen.generate()
 
+        if file_count == 0:
+            return {
+                "status": "success",
+                "repo_path": str(self.repo_path),
+                "indexed_files": 0,
+                "indexed_chunks": 0,
+                "vector_indexed": not skip_vector,
+            }
+
+        # 1. 初始化 SQLite 图引擎（清空历史表准备流式构建）
+        from code_search_mcp.graph_engine import CodeGraphEngine
+        graph_engine = CodeGraphEngine.get_instance(self.repo_path)
+        graph_engine.init_clean_graph()
+
+        # 2. 如果启用向量索引，初始化 LanceDB 与已有向量复用表
+        existing_vectors_map: Dict[str, Tuple[bytes, Any]] = {}
+        db = None
+        table = None
+        table_name = "code_chunks"
+
+        if not skip_vector:
+            try:
+                db_conn = lancedb.connect(str(self.db_path))
+                resp = db_conn.list_tables() if hasattr(db_conn, "list_tables") else db_conn.table_names()
+                tables = resp.tables if hasattr(resp, "tables") else list(resp)
+                if "code_chunks" in tables:
+                    old_tbl = db_conn.open_table("code_chunks")
+                    try:
+                        arrow_data = old_tbl.search().select(["file_path", "symbol_name", "start_line", "code", "vector"]).to_arrow()
+                    except Exception:
+                        arrow_data = old_tbl.to_arrow()
+                    files_col = arrow_data.column("file_path").to_pylist()
+                    sym_col = arrow_data.column("symbol_name").to_pylist()
+                    start_col = arrow_data.column("start_line").to_pylist()
+                    code_col = arrow_data.column("code").to_pylist()
+                    vec_col = arrow_data.column("vector").to_pylist()
+                    for f_p, s_n, s_l, c_d, v_c in zip(files_col, sym_col, start_col, code_col, vec_col):
+                        key = f"{f_p}:{s_n}:{s_l}"
+                        c_bytes = hashlib.md5(c_d.encode("utf-8")).digest() if isinstance(c_d, str) else b""
+                        existing_vectors_map[key] = (c_bytes, v_c)
+                    del arrow_data, files_col, sym_col, start_col, code_col, vec_col
+                    gc.collect()
+            except Exception:
+                existing_vectors_map.clear()
+
+            db = lancedb.connect(str(self.db_path))
+
+        # 3. 真流式批次持久化 (Streaming Batch Persistence，内存恒定极小，杜绝全局积攒)
+        STREAM_BATCH_SIZE = 300
         chunker = UniversalCodeChunker(self.repo_path)
-        all_chunks: List[CodeChunk] = []
+        current_batch: List[CodeChunk] = []
+        total_chunks = 0
+        reused_total = 0
+        embedded_total = 0
+
+        mode_desc = "轻量结构化模式 (免向量)" if skip_vector else "真流式低显存向量模式"
+        sys.stderr.write(f"[code-search-mcp] 开始流式解析与持久化 [{mode_desc}]...\n")
+        sys.stderr.flush()
+
+        def _flush_batch(batch: List[CodeChunk]) -> Any:
+            nonlocal table, embedded_total, reused_total
+            if not batch:
+                return table
+
+            # 1. 立即流式写入 SQLite nodes 表
+            graph_engine.stream_insert_chunks(batch)
+
+            # 2. 如果启用向量索引，分批推理并流式追加写入 LanceDB
+            if not skip_vector and db is not None:
+                batch_vectors: List[Any] = [None] * len(batch)
+                batch_to_embed: List[str] = []
+                batch_embed_indices: List[int] = []
+
+                for i, chunk in enumerate(batch):
+                    key = f"{chunk.file_path}:{chunk.symbol_name}:{chunk.start_line}"
+                    chunk_hash = hashlib.md5(chunk.code.encode("utf-8")).digest()
+                    if key in existing_vectors_map and existing_vectors_map[key][0] == chunk_hash:
+                        batch_vectors[i] = existing_vectors_map[key][1]
+                        reused_total += 1
+                    else:
+                        batch_to_embed.append(chunk.enriched_text)
+                        batch_embed_indices.append(i)
+
+                if batch_to_embed:
+                    embedded_total += len(batch_to_embed)
+                    new_vecs = self.embedding_engine.embed_documents(batch_to_embed, batch_size=batch_size or 32)
+                    for idx_in_batch, vec in zip(batch_embed_indices, new_vecs):
+                        batch_vectors[idx_in_batch] = vec
+                    del new_vecs
+
+                batch_data = []
+                for chunk, vec in zip(batch, batch_vectors):
+                    batch_data.append(
+                        {
+                            "id": chunk.id,
+                            "file_path": chunk.file_path,
+                            "full_path": chunk.full_path,
+                            "language": chunk.language,
+                            "symbol_name": chunk.symbol_name,
+                            "chunk_type": chunk.chunk_type,
+                            "start_line": chunk.start_line,
+                            "end_line": chunk.end_line,
+                            "code": chunk.code,
+                            "docstring": chunk.docstring or "",
+                            "decorators": chunk.decorators,
+                            "route_info": chunk.route_info,
+                            "enriched_text": chunk.enriched_text,
+                            "calls": chunk.calls,
+                            "module_name": chunk.module_name or "",
+                            "qualified_name": chunk.qualified_name or "",
+                            "vector": vec,
+                        }
+                    )
+
+                if table is None:
+                    table = db.create_table(table_name, data=batch_data, mode="overwrite")
+                else:
+                    table.add(batch_data)
+
+                del batch_data
+                del batch_vectors
+                del batch_to_embed
+                del batch_embed_indices
+
+            return table
 
         for f in files:
             try:
                 file_chunks = chunker.parse_file(f)
-                all_chunks.extend(file_chunks)
+                if not file_chunks:
+                    continue
+                current_batch.extend(file_chunks)
+                if len(current_batch) >= STREAM_BATCH_SIZE:
+                    total_chunks += len(current_batch)
+                    _flush_batch(current_batch)
+                    current_batch.clear()
+                    gc.collect()
             except Exception as e:
                 sys.stderr.write(f"[code-search-mcp] 警告: 处理文件 {f} 异常，跳过: {e}\n")
 
-        total_chunks = len(all_chunks)
-        sys.stderr.write(f"[code-search-mcp] 共切出 {total_chunks} 个多语言语义代码块\n")
-
-        if total_chunks == 0:
-            return {
-                "status": "success",
-                "repo_path": str(self.repo_path),
-                "indexed_files": len(files),
-                "indexed_chunks": 0,
-            }
-
-        # 1. 同步预构建 CodeGraph 知识图谱 (Eager Graph Build)，彻底消除首次查询冷启动延迟
-        try:
-            from code_search_mcp.graph_engine import CodeGraphEngine
-            sys.stderr.write(f"[code-search-mcp] 正在预构建代码调用图谱与全局拓扑消歧...\n")
-            sys.stderr.flush()
-            graph_engine = CodeGraphEngine.get_instance(self.repo_path)
-            graph_engine.build_from_chunks(all_chunks)
-            graph_engine.close()
-            del graph_engine
+        if current_batch:
+            total_chunks += len(current_batch)
+            _flush_batch(current_batch)
+            current_batch.clear()
             gc.collect()
-        except Exception as e:
-            sys.stderr.write(f"[code-search-mcp] 预构建图谱提示: {e}\n")
 
-        # 2. 尝试从已有 LanceDB 库中复用未改动代码块的向量 (内存安全 Content-Hash Vector Reuse)
-        existing_vectors_map: Dict[str, Tuple[bytes, Any]] = {}
-        try:
-            db_conn = lancedb.connect(str(self.db_path))
-            resp = db_conn.list_tables() if hasattr(db_conn, "list_tables") else db_conn.table_names()
-            tables = resp.tables if hasattr(resp, "tables") else list(resp)
-            if "code_chunks" in tables:
-                old_tbl = db_conn.open_table("code_chunks")
-                try:
-                    arrow_data = old_tbl.search().select(["file_path", "symbol_name", "start_line", "code", "vector"]).to_arrow()
-                except Exception:
-                    arrow_data = old_tbl.to_arrow()
-                files_col = arrow_data.column("file_path").to_pylist()
-                sym_col = arrow_data.column("symbol_name").to_pylist()
-                start_col = arrow_data.column("start_line").to_pylist()
-                code_col = arrow_data.column("code").to_pylist()
-                vec_col = arrow_data.column("vector").to_pylist()
-                for f_p, s_n, s_l, c_d, v_c in zip(files_col, sym_col, start_col, code_col, vec_col):
-                    key = f"{f_p}:{s_n}:{s_l}"
-                    c_bytes = hashlib.md5(c_d.encode("utf-8")).digest() if isinstance(c_d, str) else b""
-                    existing_vectors_map[key] = (c_bytes, v_c)
-                del arrow_data, files_col, sym_col, start_col, code_col, vec_col
-                gc.collect()
-        except Exception:
-            existing_vectors_map.clear()
-
-        # 3. 分批嵌入与流式持久化至 LanceDB (Streaming Batch Persistence，彻底解决超大仓库 OOM 137)
-        STREAM_BATCH_SIZE = 500
-        db = lancedb.connect(str(self.db_path))
-        table_name = "code_chunks"
-        table = None
-
-        sys.stderr.write(f"[code-search-mcp] 正在流式持久化至 LanceDB ({self.db_path})...\n")
-        sys.stderr.flush()
-
-        reused_total = 0
-        embedded_total = 0
-
-        for batch_start in range(0, total_chunks, STREAM_BATCH_SIZE):
-            batch_chunks = all_chunks[batch_start : batch_start + STREAM_BATCH_SIZE]
-            batch_vectors: List[Any] = [None] * len(batch_chunks)
-            batch_to_embed: List[str] = []
-            batch_embed_indices: List[int] = []
-
-            for i, chunk in enumerate(batch_chunks):
-                key = f"{chunk.file_path}:{chunk.symbol_name}:{chunk.start_line}"
-                chunk_hash = hashlib.md5(chunk.code.encode("utf-8")).digest()
-                if key in existing_vectors_map and existing_vectors_map[key][0] == chunk_hash:
-                    batch_vectors[i] = existing_vectors_map[key][1]
-                    reused_total += 1
-                else:
-                    batch_to_embed.append(chunk.enriched_text)
-                    batch_embed_indices.append(i)
-
-            if batch_to_embed:
-                embedded_total += len(batch_to_embed)
-                new_vecs = self.embedding_engine.embed_documents(batch_to_embed, batch_size=batch_size or 64)
-                for idx_in_batch, vec in zip(batch_embed_indices, new_vecs):
-                    batch_vectors[idx_in_batch] = vec
-                del new_vecs
-
-            # 组装当前小批次的 LanceDB 记录
-            batch_data = []
-            for chunk, vec in zip(batch_chunks, batch_vectors):
-                batch_data.append(
-                    {
-                        "id": chunk.id,
-                        "file_path": chunk.file_path,
-                        "full_path": chunk.full_path,
-                        "language": chunk.language,
-                        "symbol_name": chunk.symbol_name,
-                        "chunk_type": chunk.chunk_type,
-                        "start_line": chunk.start_line,
-                        "end_line": chunk.end_line,
-                        "code": chunk.code,
-                        "docstring": chunk.docstring or "",
-                        "decorators": chunk.decorators,
-                        "route_info": chunk.route_info,
-                        "enriched_text": chunk.enriched_text,
-                        "calls": chunk.calls,
-                        "module_name": chunk.module_name or "",
-                        "qualified_name": chunk.qualified_name or "",
-                        "vector": vec,
-                    }
-                )
-
-            # 流式写入: 第一批 overwrite，后续批次追加增量写入磁盘，内存占用恒定极小
-            if table is None:
-                table = db.create_table(table_name, data=batch_data, mode="overwrite")
-            else:
-                table.add(batch_data)
-
-            # 立即释放当前批次内存
-            del batch_data
-            del batch_vectors
-            del batch_to_embed
-            del batch_embed_indices
-            gc.collect()
+        # 4. 图引擎提交收尾
+        graph_engine.finalize_graph()
+        graph_engine.close()
+        del graph_engine
+        gc.collect()
 
         if reused_total > 0:
             sys.stderr.write(f"[code-search-mcp] 命中向量缓存: {reused_total} 个代码块已复用，实际推理 {embedded_total} 个新/改动代码块\n")
@@ -503,16 +539,17 @@ class CodeIndexer:
         existing_vectors_map.clear()
         gc.collect()
 
-        # 建立全文 FTS 索引 (消除 LanceDB 0.25+ 废弃警告)
-        if table is not None:
+        # 5. 如果构建了向量表，建立全文 FTS 索引
+        if not skip_vector and table is not None:
             _create_fts_index_safe(table, "enriched_text")
 
-        # 记录元信息 (包含版本控制与模型参数)
+        # 6. 记录元信息
         meta_file = self.db_path / "meta.json"
         meta = {
             "schema_version": INDEX_SCHEMA_VERSION,
-            "model_name": self.embedding_engine.model_name,
-            "vector_dimension": get_vector_dimension(self.embedding_engine.model_name),
+            "model_name": self.embedding_engine.model_name if not skip_vector else "",
+            "vector_dimension": get_vector_dimension(self.embedding_engine.model_name) if not skip_vector else 0,
+            "vector_indexed": not skip_vector,
             "repo_path": str(self.repo_path),
             "indexed_files": len(files),
             "indexed_chunks": total_chunks,
@@ -538,6 +575,7 @@ class CodeIndexer:
             "repo_path": str(self.repo_path),
             "indexed_files": len(files),
             "indexed_chunks": total_chunks,
+            "vector_indexed": not skip_vector,
         }
 
     def _sync_meta_stats(self, tbl=None):

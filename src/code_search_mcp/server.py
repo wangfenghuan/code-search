@@ -28,14 +28,16 @@ mcp = FastMCP("code-search-mcp")
 
 
 @mcp.tool()
-def index_codebase(path: str) -> str:
-    """扫描并索引指定路径下的多语言代码库，生成用于语义搜索的向量数据库和项目架构大纲，并自动激活后台实时热监听器。
+def index_codebase(path: str, skip_vector: bool = False, force_vector: bool = False) -> str:
+    """扫描并索引指定路径下的多语言代码库，生成代码知识图谱、架构大纲与向量数据库，并自动激活后台实时热监听器。
 
     Args:
         path: 代码库的根目录路径（支持相对路径或绝对路径）
+        skip_vector: 是否跳过向量嵌入（默认 False；对 >2000 文件的超大仓库将自动开启以避免高负载与耗时，仅构建 CodeGraph 结构图与大纲）
+        force_vector: 是否强制启用全量流式向量嵌入（默认 False；设为 True 时即使大仓库也执行真流式向量化，内存恒定极小）
 
     Returns:
-        索引结果摘要（包含文件数和生成的代码块数）
+        索引结果摘要（包含文件数、生成的代码块数与索引模式）
     """
     try:
         repo_dir = Path(path).resolve()
@@ -43,17 +45,20 @@ def index_codebase(path: str) -> str:
             return f"错误: 路径 '{path}' 不存在或不是一个有效目录。"
 
         indexer = CodeIndexer(repo_dir)
-        res = indexer.index_all()
+        res = indexer.index_all(skip_vector=skip_vector, force_vector=force_vector)
 
         # 自动启动该仓库的后台实时热监听器，后续任意代码保存操作均自动毫秒级增量同步
         get_or_create_watcher(repo_dir, auto_start=True)
 
+        mode_str = "轻量结构化模式 (免向量)" if not res.get("vector_indexed", True) else "全量流式向量模式"
+
         return (
             f"成功完成代码库索引！\n"
             f"- 目标路径: {res['repo_path']}\n"
+            f"- 索引模式: {mode_str}\n"
             f"- 扫描多语言源文件数: {res['indexed_files']}\n"
             f"- 提取代码块数: {res['indexed_chunks']}\n"
-            f"- 📡 后台热更新监听器: 已启动 (监控 Python/TS/JS/Go，改动保存即刻增量生效)\n"
+            f"- 📡 后台热更新监听器: 已启动 (监控 Python/TS/JS/Go/Java/Rust，改动保存即刻增量生效)\n"
             f"提示: 可随时调用 `get_codebase_outline()` 查看全局架构大纲，或使用 `get_watch_status()` 查看同步状态。"
         )
     except Exception as e:

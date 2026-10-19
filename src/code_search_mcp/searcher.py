@@ -145,6 +145,10 @@ class CodeSearcher:
             if meta.get("schema_version") != INDEX_SCHEMA_VERSION:
                 self._invalidate_cache()
                 return False
+            # 如果是轻量模式 (未建立向量库)，检查 SQLite graph.sqlite3 是否存在且有数据
+            if not meta.get("vector_indexed", True):
+                sqlite_path = self.db_path / "graph.sqlite3"
+                return sqlite_path.exists()
             if meta.get("model_name") != DEFAULT_MODEL_NAME:
                 self._invalidate_cache()
                 return False
@@ -156,8 +160,8 @@ class CodeSearcher:
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """执行工业级多路 RRF 倒数排名融合检索：
-        通道 1: LanceDB Dense 向量语义相似度召回
-        通道 2: LanceDB BM25 / FTS 全文检索召回
+        通道 1: LanceDB Dense 向量语义相似度召回 (仅在 vector_indexed=True 时启用)
+        通道 2: LanceDB BM25 / FTS 全文检索召回 (轻量模式使用 SQLite 词法匹配)
         通道 3: 内置 ripgrep 确切代码符号匹配召回
         通道 4: AST 路由与类名/函数名精确结构匹配
 
@@ -166,13 +170,15 @@ class CodeSearcher:
         if not self.is_indexed():
             return []
 
-        # 1. 查询文本标识符自然语言展开 (强化 bge-small-zh 对长标识符的捕捉)
-        expanded_query = expand_query_with_splits(query)
-        query_vec = self.embedding_engine.embed_query(expanded_query)
-        if not query_vec:
-            return []
+        meta_file = self.db_path / "meta.json"
+        is_vector_indexed = True
+        if meta_file.exists():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                is_vector_indexed = meta.get("vector_indexed", True)
+            except Exception:
+                pass
 
-        table = self._get_table()
         candidate_limit = max(top_k * 6, 40)
         candidates_map: Dict[str, Dict[str, Any]] = {}
 
@@ -183,46 +189,75 @@ class CodeSearcher:
             split_tokens.extend(split_camel_snake_case(tok))
         all_query_tokens = list(dict.fromkeys(raw_tokens + split_tokens))
 
-        # ---------------------------------------------------------
-        # 通道 1: Dense 向量语义相似度检索 (Vector Dense Channel)
-        # ---------------------------------------------------------
         dense_rank: Dict[str, int] = {}
-        try:
-            dense_records = table.search(query_vec).limit(candidate_limit).to_list()
-            for r_idx, r in enumerate(dense_records):
-                cid = str(r.get("id"))
-                candidates_map[cid] = r
-                dense_rank[cid] = r_idx
-        except Exception:
-            pass
-
-        # ---------------------------------------------------------
-        # 通道 2: LanceDB BM25 / 全文检索 (Sparse FTS Channel)
-        # ---------------------------------------------------------
         sparse_rank: Dict[str, int] = {}
-        try:
-            sparse_records = table.search(query, query_type="fts").limit(candidate_limit).to_list()
-            for s_idx, r in enumerate(sparse_records):
-                cid = str(r.get("id"))
-                if cid not in candidates_map:
-                    candidates_map[cid] = r
-                sparse_rank[cid] = s_idx
-        except Exception:
-            # 降级：若未建 FTS 索引或异常，使用精确标识符 SQL 过滤作为词法召回
-            if all_query_tokens:
-                ident_clauses = " OR ".join(
-                    [
-                        f"lower(symbol_name) LIKE '%{ident}%' OR lower(route_info) LIKE '%{ident}%' OR lower(code) LIKE '%{ident}%'"
-                        for ident in all_query_tokens[:4]
-                    ]
-                )
+
+        if is_vector_indexed:
+            # 1. 查询文本标识符自然语言展开 (强化 bge-small-zh 对长标识符的捕捉)
+            expanded_query = expand_query_with_splits(query)
+            query_vec = self.embedding_engine.embed_query(expanded_query)
+
+            table = self._get_table()
+            if query_vec and table is not None:
+                # 通道 1: Dense 向量语义相似度检索 (Vector Dense Channel)
                 try:
-                    fallback_records = table.search().where(ident_clauses).limit(candidate_limit).to_list()
-                    for s_idx, r in enumerate(fallback_records):
+                    dense_records = table.search(query_vec).limit(candidate_limit).to_list()
+                    for r_idx, r in enumerate(dense_records):
+                        cid = str(r.get("id"))
+                        candidates_map[cid] = r
+                        dense_rank[cid] = r_idx
+                except Exception:
+                    pass
+
+            if table is not None:
+                # 通道 2: LanceDB BM25 / 全文检索 (Sparse FTS Channel)
+                try:
+                    sparse_records = table.search(query, query_type="fts").limit(candidate_limit).to_list()
+                    for s_idx, r in enumerate(sparse_records):
                         cid = str(r.get("id"))
                         if cid not in candidates_map:
                             candidates_map[cid] = r
                         sparse_rank[cid] = s_idx
+                except Exception:
+                    # 降级：若未建 FTS 索引或异常，使用精确标识符 SQL 过滤作为词法召回
+                    if all_query_tokens:
+                        ident_clauses = " OR ".join(
+                            [
+                                f"lower(symbol_name) LIKE '%{ident}%' OR lower(route_info) LIKE '%{ident}%' OR lower(code) LIKE '%{ident}%'"
+                                for ident in all_query_tokens[:4]
+                            ]
+                        )
+                        try:
+                            fallback_records = table.search().where(ident_clauses).limit(candidate_limit).to_list()
+                            for s_idx, r in enumerate(fallback_records):
+                                cid = str(r.get("id"))
+                                if cid not in candidates_map:
+                                    candidates_map[cid] = r
+                                sparse_rank[cid] = s_idx
+                        except Exception:
+                            pass
+        else:
+            # 轻量模式: 从 SQLite nodes 表检索候选符号
+            sqlite_path = self.db_path / "graph.sqlite3"
+            if sqlite_path.exists():
+                try:
+                    import sqlite3
+                    conn = sqlite3.connect(str(sqlite_path))
+                    conn.row_factory = sqlite3.Row
+                    clauses = []
+                    params = []
+                    for tok in all_query_tokens[:5]:
+                        clauses.append("(symbol_name LIKE ? OR route_info LIKE ? OR code LIKE ?)")
+                        params.extend([f"%{tok}%", f"%{tok}%", f"%{tok}%"])
+                    where_clause = " OR ".join(clauses) if clauses else "1=1"
+                    sql = f"SELECT id, file_path, symbol_name, chunk_type, start_line, end_line, code, docstring, route_info, module_name, qualified_name FROM nodes WHERE {where_clause} LIMIT {candidate_limit}"
+                    rows = conn.execute(sql, params).fetchall()
+                    for s_idx, r in enumerate(rows):
+                        r_dict = dict(r)
+                        cid = str(r_dict.get("id"))
+                        candidates_map[cid] = r_dict
+                        sparse_rank[cid] = s_idx
+                    conn.close()
                 except Exception:
                     pass
 

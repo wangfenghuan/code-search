@@ -176,6 +176,112 @@ class CodeGraphEngine:
             chunks.append({col: arrow_tbl.column(col)[i].as_py() for col in arrow_tbl.schema.names})
         return self.build_from_chunks(chunks)
 
+    def init_clean_graph(self):
+        """初始化图数据库并清空历史表，准备进行增量/流式构建"""
+        conn = self._get_db()
+        self._init_sqlite_schema(conn)
+        conn.execute("DELETE FROM resolved_queries;")
+        conn.execute("DELETE FROM resolved_edges;")
+        conn.execute("DELETE FROM calls;")
+        conn.execute("DELETE FROM nodes;")
+        conn.commit()
+
+    def stream_insert_chunks(self, chunks: Sequence[Any]):
+        """流式分批写入节点到 SQLite (不驻留全量列表，毫秒级流式入库)"""
+        conn = self._get_db()
+        nodes_to_insert = []
+        calls_to_insert = []
+
+        for c in chunks:
+            if isinstance(c, dict):
+                node_id = str(c.get("id", ""))
+                file_path = str(c.get("file_path", ""))
+                sym_name = str(c.get("symbol_name", ""))
+                chunk_type = str(c.get("chunk_type", ""))
+                start_line = int(c.get("start_line", 1))
+                end_line = int(c.get("end_line", 1))
+                code = str(c.get("code", ""))
+                docstring = str(c.get("docstring", "") or "")
+                route_info = str(c.get("route_info", "") or "")
+                module_name = str(c.get("module_name", "") or "")
+                qualified_name = str(c.get("qualified_name", "") or "")
+                calls_raw = c.get("calls", "[]")
+            else:
+                node_id = str(getattr(c, "id", f"{getattr(c, 'file_path', '')}:{getattr(c, 'start_line', 1)}:{getattr(c, 'symbol_name', '')}"))
+                file_path = str(getattr(c, "file_path", ""))
+                sym_name = str(getattr(c, "symbol_name", ""))
+                chunk_type = str(getattr(c, "chunk_type", ""))
+                start_line = int(getattr(c, "start_line", 1))
+                end_line = int(getattr(c, "end_line", 1))
+                code = str(getattr(c, "code", ""))
+                docstring = str(getattr(c, "docstring", "") or "")
+                route_info = str(getattr(c, "route_info", "") or "")
+                module_name = str(getattr(c, "module_name", "") or "")
+                qualified_name = str(getattr(c, "qualified_name", "") or "")
+                calls_raw = getattr(c, "calls", "[]")
+
+            nodes_to_insert.append((
+                node_id, file_path, sym_name, chunk_type, start_line, end_line,
+                code, docstring, route_info, module_name, qualified_name
+            ))
+
+            try:
+                calls_list = json.loads(calls_raw) if isinstance(calls_raw, str) else list(calls_raw)
+            except Exception:
+                calls_list = []
+
+            for call_item in calls_list:
+                call_str = str(call_item).strip()
+                if not call_str:
+                    continue
+                is_dynamic = 0
+                dynamic_expr = ""
+                callee_name = call_str
+                callee_qual = ""
+
+                if call_str.startswith("dynamic:"):
+                    is_dynamic = 1
+                    dynamic_expr = call_str[len("dynamic:"):].strip()
+                    if dynamic_expr.startswith("getattr(") and ")" in dynamic_expr:
+                        inner = dynamic_expr[len("getattr("):dynamic_expr.find(")")]
+                        parts = [p.strip() for p in inner.split(",", 1)]
+                        if len(parts) == 2:
+                            callee_name = parts[1]
+                    elif dynamic_expr.startswith("subscript(") and ")" in dynamic_expr:
+                        inner = dynamic_expr[len("subscript("):dynamic_expr.find(")")]
+                        parts = [p.strip() for p in inner.split(",", 1)]
+                        if len(parts) == 2:
+                            callee_name = parts[1]
+                    elif dynamic_expr.startswith("index(") and ")" in dynamic_expr:
+                        inner = dynamic_expr[len("index("):dynamic_expr.find(")")]
+                        parts = [p.strip() for p in inner.split(",", 1)]
+                        if len(parts) == 2:
+                            callee_name = parts[1]
+                elif call_str.startswith("<dynamic:"):
+                    is_dynamic = 1
+
+                calls_to_insert.append((
+                    node_id, sym_name, callee_name, callee_qual, is_dynamic, dynamic_expr, file_path
+                ))
+
+        if nodes_to_insert:
+            conn.executemany(
+                "INSERT OR REPLACE INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                nodes_to_insert
+            )
+        if calls_to_insert:
+            conn.executemany(
+                "INSERT INTO calls (caller_id, caller_symbol, callee_name, callee_qualified, is_dynamic, dynamic_expr, source_file) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                calls_to_insert
+            )
+        conn.commit()
+
+    def finalize_graph(self):
+        """流式构建全部完成后记录元数据并提交"""
+        conn = self._get_db()
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (INDEX_SCHEMA_VERSION,))
+        conn.commit()
+
     def build_from_chunks(self, chunks: Sequence[Any]) -> bool:
         """从内存中的 CodeChunk 列表直接构建 SQLite 图谱索引与解析边（预构建消除首次查询延迟）"""
         conn = self._get_db()
