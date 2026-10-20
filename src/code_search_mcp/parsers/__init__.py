@@ -39,6 +39,7 @@ from .java import JavaParser
 from .javascript import TSJSParser
 from .python import PythonParser
 from .rust import RustParser
+from .vue import VueParser
 
 __all__ = [
     "TreeSitterParser",
@@ -48,6 +49,7 @@ __all__ = [
     "GoParser",
     "JavaParser",
     "RustParser",
+    "VueParser",
     "ParsedSymbol",
     "FileImports",
     "EXTENSION_LANG_MAP",

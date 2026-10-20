@@ -41,7 +41,7 @@ class ProjectOutlineGenerator:
         functions: List[Dict[str, Any]] = []
 
         for sym in symbols:
-            if sym.symbol_type in ("class", "struct", "interface", "record", "enum", "annotation"):
+            if sym.symbol_type in ("class", "struct", "interface", "record", "enum", "annotation", "component"):
                 classes_map[sym.name] = {
                     "name": sym.name,
                     "type": sym.symbol_type,

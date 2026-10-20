@@ -141,6 +141,7 @@ EXTENSION_LANG_MAP: Dict[str, str] = {
     ".go": "go",
     ".java": "java",
     ".rs": "rust",
+    ".vue": "vue",
 }
 
 

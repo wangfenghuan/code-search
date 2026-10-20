@@ -99,6 +99,7 @@ def _detect_lexer(file_path: str) -> str:
         ".yml": "yaml",
         ".yaml": "yaml",
         ".toml": "toml",
+        ".vue": "html",
     }
     return mapping.get(ext, "text")
 
