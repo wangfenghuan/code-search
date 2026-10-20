@@ -1,0 +1,43 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  pypi-publish:
+    name: Build and upload to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # 用于 PyPI Trusted Publishing
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Build package
+        run: uv build
+
+      - name: Publish package distributions to PyPI (Token)
+        if: env.HAS_TOKEN == 'true'
+        run: uv publish --token ${{ secrets.PYPI_API_TOKEN }}
+        env:
+          HAS_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
+
+      - name: Publish package distributions to PyPI (Trusted Publishing)
+        if: env.HAS_TOKEN != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        env:
+          HAS_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
