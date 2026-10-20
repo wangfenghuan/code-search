@@ -21,37 +21,72 @@ class MatchItem:
 
 def find_system_ripgrep() -> Optional[str]:
     """探测 ripgrep (rg) 二进制：
-    1. 优先使用项目自带预编译二进制 (src/code_search_mcp/bin/rg[.exe])，零配置开箱即用
-    2. 检查系统 PATH 环境变量
-    3. 检查常见安装路径与主流开发工具 (VS Code / Cursor 内置模块)
+    1. 优先使用项目自带跨平台预编译二进制 (Windows: rg.exe, Linux: x86_64-musl/arm64, macOS: Apple Silicon/Intel)
+    2. 检查系统 PATH 环境变量 (shutil.which("rg"))
+    3. 检查常见安装路径与主流开发工具 (Homebrew, Cargo, VS Code / Cursor 内置模块)
     """
-    # 1. 优先查本包自带预编译二进制（区分 Windows 与 Linux/macOS）
+    import platform
+
+    # 1. 优先查本包自带预编译二进制（区分 Windows、Linux、macOS 及 CPU 架构）
     bin_dir = Path(__file__).resolve().parent / "bin"
-    target_bin = "rg.exe" if sys.platform == "win32" else "rg"
-    bundled_rg = bin_dir / target_bin
-    if bundled_rg.exists() and bundled_rg.is_file():
-        if sys.platform != "win32" and not os.access(bundled_rg, os.X_OK):
-            try:
-                os.chmod(bundled_rg, 0o755)
-            except Exception:
-                pass
-        return str(bundled_rg)
+    if bin_dir.exists():
+        system = sys.platform
+        machine = platform.machine().lower()
+        is_arm = machine in ("arm64", "aarch64")
+
+        candidates: List[str] = []
+        if system == "win32":
+            candidates = ["rg.exe"]
+        elif system == "darwin":
+            # macOS: 优先根据架构选择对应预编译二进制
+            if is_arm:
+                candidates = ["rg-aarch64-apple-darwin", "rg"]
+            else:
+                candidates = ["rg-x86_64-apple-darwin", "rg"]
+        elif system.startswith("linux"):
+            # Linux: 静态 musl 优先，无 glibc 依赖，支持任意发行版与容器
+            if is_arm:
+                candidates = ["rg-aarch64-unknown-linux-gnu", "rg"]
+            else:
+                candidates = ["rg-x86_64-unknown-linux-musl", "rg"]
+        else:
+            candidates = ["rg"]
+
+        for cand_name in candidates:
+            cand_path = bin_dir / cand_name
+            if cand_path.exists() and cand_path.is_file():
+                if system != "win32" and not os.access(cand_path, os.X_OK):
+                    try:
+                        os.chmod(cand_path, 0o755)
+                    except Exception:
+                        pass
+                return str(cand_path)
 
     # 2. 查系统 PATH
     rg_in_path = shutil.which("rg") or shutil.which("rg.exe")
     if rg_in_path:
         return rg_in_path
 
-    # 3. 检查常见安装路径与开发工具
+    # 3. 检查常见安装路径与开发工具 (兼容 Windows / macOS Homebrew / Linux)
     user_home = Path.home()
     candidate_paths = [
+        # macOS Homebrew / 系统路径
+        Path("/opt/homebrew/bin/rg"),
+        Path("/usr/local/bin/rg"),
+        # Linux standard paths
+        Path("/usr/bin/rg"),
+        Path("/bin/rg"),
+        # Cargo & 包管理器
+        user_home / ".cargo" / "bin" / "rg",
         user_home / ".cargo" / "bin" / "rg.exe",
         user_home / "scoop" / "shims" / "rg.exe",
         Path("C:/ProgramData/chocolatey/bin/rg.exe"),
         # VS Code 内置
         user_home / "AppData/Local/Programs/Microsoft VS Code/resources/app/node_modules/@vscode/ripgrep/bin/rg.exe",
+        user_home / ".vscode/extensions/node_modules/@vscode/ripgrep/bin/rg",
         # Cursor 内置
         user_home / "AppData/Local/Programs/cursor/resources/app/node_modules/@vscode/ripgrep/bin/rg.exe",
+        user_home / ".cursor/extensions/node_modules/@vscode/ripgrep/bin/rg",
     ]
 
     for p in candidate_paths:
