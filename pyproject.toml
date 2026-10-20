@@ -1,7 +1,7 @@
 [project]
 name = "code-search-graph"
-version = "0.8.0"
-description = "Fast, intelligent, multi-language code search and AST call graph MCP server for AI assistants (Python, TypeScript, JavaScript, Go, Java, Rust)"
+version = "0.8.1"
+description = "Fast, intelligent, multi-language code search and AST call graph MCP server for AI assistants (Python, TypeScript, JavaScript, Vue, Go, Java, Rust)"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
@@ -15,6 +15,7 @@ keywords = [
     "codegraph",
     "ast",
     "tree-sitter",
+    "vue",
     "ripgrep",
     "lancedb",
     "vector-search",
