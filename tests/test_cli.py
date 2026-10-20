@@ -61,12 +61,20 @@ def test_cli_all_subcommands():
     assert "索引成功" in out
     print("✅ 2. CLI index 子命令测试通过")
 
-    # 3. 测试 outline
+    # 3. 测试 outline (分别测试位置参数、--path 与 -p 选项)
     code, out, err = run_cli_cmd(["outline", str(SAMPLE_REPO)])
-    assert code == 0, f"outline 失败: {err}"
+    assert code == 0, f"outline 位置参数失败: {err}"
     assert "项目全局多语言架构大纲" in out
     assert "auth.py" in out
-    print("✅ 3. CLI outline 子命令测试通过")
+
+    code, out, err = run_cli_cmd(["outline", "--path", str(SAMPLE_REPO)])
+    assert code == 0, f"outline --path 选项失败: {err}"
+    assert "项目全局多语言架构大纲" in out
+
+    code, out, err = run_cli_cmd(["outline", "-p", str(SAMPLE_REPO)])
+    assert code == 0, f"outline -p 选项失败: {err}"
+    assert "项目全局多语言架构大纲" in out
+    print("✅ 3. CLI outline 子命令（位置参数/--path/-p 全兼容）测试通过")
 
     # 4. 测试 search
     code, out, err = run_cli_cmd(["search", "用户登录认证与密码校验", "--path", str(SAMPLE_REPO)])

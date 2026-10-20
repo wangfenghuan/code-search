@@ -62,10 +62,17 @@ def main():
     # index 子命令
     index_parser = subparsers.add_parser("index", help="扫描并索引指定代码库")
     index_parser.add_argument(
-        "path",
+        "positional_path",
         nargs="?",
-        default=".",
-        help="代码库根目录路径（默认当前目录）",
+        default=None,
+        help="代码库根目录路径（位置参数，与 --path 等价，默认当前目录）",
+    )
+    index_parser.add_argument(
+        "--path",
+        "-p",
+        dest="flag_path",
+        default=None,
+        help="代码库根目录路径（与位置参数等价，默认当前目录）",
     )
     index_parser.add_argument(
         "--skip-vector",
@@ -87,19 +94,33 @@ def main():
     # outline 子命令
     outline_parser = subparsers.add_parser("outline", help="查看代码库全局架构大纲地图")
     outline_parser.add_argument(
-        "path",
+        "positional_path",
         nargs="?",
-        default="",
-        help="代码库根目录路径（默认当前或最近索引项目）",
+        default=None,
+        help="代码库根目录路径（位置参数，与 --path 等价，默认当前或最近索引项目）",
+    )
+    outline_parser.add_argument(
+        "--path",
+        "-p",
+        dest="flag_path",
+        default=None,
+        help="目标代码库路径（默认当前或最近索引项目）",
     )
 
     # search 子命令 (语义 + 混合)
     search_parser = subparsers.add_parser("search", help="语义搜索已索引的代码")
     search_parser.add_argument("query", help="自然语言搜索关键词")
     search_parser.add_argument(
+        "positional_path",
+        nargs="?",
+        default=None,
+        help="目标代码库路径（位置参数，与 --path 等价）",
+    )
+    search_parser.add_argument(
         "--path",
         "-p",
-        default="",
+        dest="flag_path",
+        default=None,
         help="目标代码库路径（默认当前或最近索引项目）",
     )
     search_parser.add_argument(
@@ -119,9 +140,16 @@ def main():
     exact_parser = subparsers.add_parser("exact", help="使用 ripgrep 极速精准字面量/正则搜索")
     exact_parser.add_argument("pattern", help="要搜索的确切文本或正则表达式")
     exact_parser.add_argument(
+        "positional_path",
+        nargs="?",
+        default=None,
+        help="目标代码库路径（位置参数，与 --path 等价）",
+    )
+    exact_parser.add_argument(
         "--path",
         "-p",
-        default="",
+        dest="flag_path",
+        default=None,
         help="目标代码库路径（默认当前或最近索引项目）",
     )
     exact_parser.add_argument(
@@ -153,28 +181,64 @@ def main():
     # explore 子命令 (一键手术级探索)
     explore_parser = subparsers.add_parser("explore", help="一键直达全链路业务探索（CodeGraph 风格）")
     explore_parser.add_argument("query", help="业务问题或功能描述")
-    explore_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
+    explore_parser.add_argument(
+        "positional_path",
+        nargs="?",
+        default=None,
+        help="目标代码库路径（位置参数，与 --path 等价）",
+    )
+    explore_parser.add_argument("--path", "-p", dest="flag_path", default=None, help="目标代码库路径")
     explore_parser.add_argument("--top-k", "-k", type=int, default=2, help="聚合的核心入口数（默认 2）")
 
     # callers 子命令 (上游调用追踪)
     callers_parser = subparsers.add_parser("callers", help="查询谁调用了指定函数或类")
     callers_parser.add_argument("symbol", help="目标符号名称")
-    callers_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
+    callers_parser.add_argument(
+        "positional_path",
+        nargs="?",
+        default=None,
+        help="目标代码库路径（位置参数，与 --path 等价）",
+    )
+    callers_parser.add_argument("--path", "-p", dest="flag_path", default=None, help="目标代码库路径")
 
     # callees 子命令 (下游依赖追踪)
     callees_parser = subparsers.add_parser("callees", help="查询指定函数直接调用的下游模块")
     callees_parser.add_argument("symbol", help="目标符号名称")
-    callees_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
+    callees_parser.add_argument(
+        "positional_path",
+        nargs="?",
+        default=None,
+        help="目标代码库路径（位置参数，与 --path 等价）",
+    )
+    callees_parser.add_argument("--path", "-p", dest="flag_path", default=None, help="目标代码库路径")
 
     # impact 子命令 (改动影响面分析)
     impact_parser = subparsers.add_parser("impact", help="改动影响面/爆炸半径分析")
     impact_parser.add_argument("symbol", help="准备修改的目标符号")
-    impact_parser.add_argument("--path", "-p", default="", help="目标代码库路径")
+    impact_parser.add_argument(
+        "positional_path",
+        nargs="?",
+        default=None,
+        help="目标代码库路径（位置参数，与 --path 等价）",
+    )
+    impact_parser.add_argument("--path", "-p", dest="flag_path", default=None, help="目标代码库路径")
     impact_parser.add_argument("--depth", "-d", type=int, default=3, help="追踪最大层级（默认 3）")
 
     # watch 子命令 (实时热监控增量更新)
     watch_parser = subparsers.add_parser("watch", help="启动前台实时热更新文件监控器")
-    watch_parser.add_argument("path", nargs="?", default="", help="代码库根目录路径（默认当前或最近索引项目）")
+    watch_parser.add_argument(
+        "positional_path",
+        nargs="?",
+        default=None,
+        help="代码库根目录路径（位置参数，与 --path 等价，默认当前或最近索引项目）",
+    )
+    watch_parser.add_argument(
+        "--path",
+        "-p",
+        dest="flag_path",
+        default=None,
+        help="目标代码库路径（默认当前或最近索引项目）",
+    )
     watch_parser.add_argument("--debounce", "-d", type=int, default=1500, help="防抖延迟毫秒数（默认 1500ms）")
 
     # install 子命令 (一键全自动配置 Claude Desktop / Claude Code / Cursor / Windsurf / Cline)
@@ -190,16 +254,31 @@ def main():
 
     # clean 子命令 (清理缓存与释放磁盘空间)
     clean_parser = subparsers.add_parser("clean", help="清理代码库索引缓存与无用临时数据")
+    clean_parser.add_argument(
+        "positional_path",
+        nargs="?",
+        default=None,
+        help="目标代码库路径（位置参数，与 --path 等价）",
+    )
     clean_parser.add_argument("--all", "-a", action="store_true", help="清空所有代码库的缓存数据")
     clean_parser.add_argument("--orphaned", "-o", action="store_true", help="仅清理项目源目录已不存在的孤儿幽灵缓存（默认推荐）")
     clean_parser.add_argument("--days", "-d", type=int, default=None, help="清理超过指定天数未更新的陈旧缓存")
-    clean_parser.add_argument("--path", "-p", default="", help="仅清理指定代码库的缓存（默认当前或指定项目）")
+    clean_parser.add_argument("--path", "-p", dest="flag_path", default=None, help="仅清理指定代码库的缓存（默认当前或指定项目）")
     clean_parser.add_argument("--dry-run", action="store_true", help="模拟预览将要清理的内容和释放的磁盘空间，不实际删除")
 
     # serve 子命令（默认或作为 MCP 启动）
     serve_parser = subparsers.add_parser("serve", help="以 MCP stdio 协议启动服务")
 
     args = parser.parse_args()
+
+    def get_cmd_repo_path(default: str = "") -> str:
+        """统一从命令行解析结果中获取目标代码库路径（优先 --path/-p，次选位置参数，兜底 default）"""
+        return (
+            getattr(args, "flag_path", None)
+            or getattr(args, "positional_path", None)
+            or getattr(args, "path", None)
+            or default
+        )
 
     # 如果无参数
     if args.command is None:
@@ -218,7 +297,7 @@ def main():
         return
 
     if args.command == "index":
-        target = Path(args.path).resolve()
+        target = Path(get_cmd_repo_path(default=".")).resolve()
         if not target.exists() or not target.is_dir():
             print_error(f"目标路径 '{target}' 不存在或非目录")
             sys.exit(1)
@@ -234,7 +313,7 @@ def main():
         print_index_result(res, elapsed_seconds=elapsed)
 
     elif args.command == "outline":
-        target = resolve_repo_path(args.path)
+        target = resolve_repo_path(get_cmd_repo_path())
         if not target or not target.exists():
             print_error("未找到目标代码库")
             sys.exit(1)
@@ -244,7 +323,7 @@ def main():
         print_markdown(gen.format_as_markdown(outline_data))
 
     elif args.command == "search":
-        target = resolve_repo_path(args.path)
+        target = resolve_repo_path(get_cmd_repo_path())
         if not target or not target.exists():
             print_error("未找到目标代码库，请先执行 index 命令")
             sys.exit(1)
@@ -259,7 +338,7 @@ def main():
         print_search_results(results, args.query, target, compact=not args.full)
 
     elif args.command == "exact":
-        target = resolve_repo_path(args.path)
+        target = resolve_repo_path(get_cmd_repo_path())
         if not target or not target.exists():
             print_error("未找到目标代码库")
             sys.exit(1)
@@ -276,7 +355,7 @@ def main():
 
     elif args.command == "explore":
         from code_search_mcp.graph_engine import CodeGraphEngine
-        target = resolve_repo_path(args.path)
+        target = resolve_repo_path(get_cmd_repo_path())
         if not target or not target.exists():
             print_error("未找到目标代码库")
             sys.exit(1)
@@ -290,7 +369,7 @@ def main():
 
     elif args.command == "callers":
         from code_search_mcp.graph_engine import CodeGraphEngine, format_callers_markdown
-        target = resolve_repo_path(args.path)
+        target = resolve_repo_path(get_cmd_repo_path())
         if not target or not target.exists():
             print_error("未找到目标代码库")
             sys.exit(1)
@@ -301,7 +380,7 @@ def main():
 
     elif args.command == "callees":
         from code_search_mcp.graph_engine import CodeGraphEngine, format_callees_markdown
-        target = resolve_repo_path(args.path)
+        target = resolve_repo_path(get_cmd_repo_path())
         if not target or not target.exists():
             print_error("未找到目标代码库")
             sys.exit(1)
@@ -312,7 +391,7 @@ def main():
 
     elif args.command == "impact":
         from code_search_mcp.graph_engine import CodeGraphEngine, format_impact_markdown
-        target = resolve_repo_path(args.path)
+        target = resolve_repo_path(get_cmd_repo_path())
         if not target or not target.exists():
             print_error("未找到目标代码库")
             sys.exit(1)
@@ -324,7 +403,7 @@ def main():
     elif args.command == "watch":
         from code_search_mcp.watcher import RepoWatcher
 
-        target = resolve_repo_path(args.path)
+        target = resolve_repo_path(get_cmd_repo_path())
         if not target or not target.exists():
             print_error("未找到目标代码库")
             sys.exit(1)
@@ -382,13 +461,14 @@ def main():
         from code_search_mcp.cache_manager import CacheManager
 
         mgr = CacheManager()
+        clean_target = get_cmd_repo_path() or None
         # 如果未指定特殊参数，默认以孤儿清理为主
-        is_orphaned = args.orphaned or (not args.all and not args.days and not args.path)
+        is_orphaned = args.orphaned or (not args.all and not args.days and not clean_target)
         res = mgr.clean(
             all_caches=args.all,
             orphaned_only=is_orphaned,
             older_than_days=args.days,
-            target_repo=args.path if args.path else None,
+            target_repo=clean_target,
             dry_run=args.dry_run,
         )
         print_clean_result(res)
