@@ -1,127 +1,72 @@
 # code-search-mcp
 
-> 🚀 **极简、零服务、超省 Token 的全栈代码库情报 MCP 服务**  
-> 融合 **REA 组装成熟工具哲学** 与 **Zed 极速索引架构**：集成 **ripgrep** 工业级精准检索 + **tree-sitter** 全语言统一解析 (**Python / TypeScript / JavaScript / Go / Java / Rust**) + **LanceDB & bge-small-zh** 本地语义向量检索，专为 Claude Code、Cursor、Codex 等 AI 编程助手打造。
+Fast, local code search and symbol graph for AI coding agents.
+
+Turn any repository into an indexed knowledge graph with Tree-sitter, SQLite, LanceDB, and ripgrep. Runs entirely on your machine via the Model Context Protocol (MCP).
 
 ---
 
-## 📊 极致性能基准 (Zed-Inspired Benchmark)
+## 为什么写这个工具 (The Problem)
 
-吸收 Zed 与现代轻量索引理念（符号定义轻量提取 + 调用边按需解析 + 向量分批流式入库），彻底告别全局预计算的内存暴涨与卡死：
+当 Claude Code、Cursor 或其他 AI 编程助手面对一个陌生的大型代码库时，它们通常会陷入这种死循环：
 
-| 指标维度 | 优化前 (全量预构建调用图) | 优化后 (轻量提取 + 按需解析) | 提升效果 |
-|---|---|---|---|
-| **FastAPI 全量索引** (1,171 文件 / 6,545 符号) | 520 秒 (8.7 分钟) | **38 秒** | ⚡ **~14x 速度飞跃** |
-| **内存峰值 (Peak Memory)** | > 4.2 GB (4G 内存机器 OOM 崩溃) | **< 450 MB** | 🛡️ **内存占用下降 89%**，OOM 彻底消失 |
-| **调用方查询 (`get_symbol_callers`)** | 首次查询需等待全局图同步 (数秒延迟) | **< 15 ms** (ripgrep + AST 即时验证) | 🚀 **零冷启动延迟** |
-| **代码搜索融合排序** | 启发式硬编码加权 | **4 路标准 RRF (倒数排名融合)** | 🎯 **Top-1 命中率显著提升** |
+1. `grep` 搜一个函数名，命中了 40 个结果；
+2. 随便挑两个文件读，发现不是定义，只是调用点；
+3. 接着 `grep`、接着 `read_file`，几轮下来消耗了几万 Token，上下文窗口被无关代码塞满；
+4. 问它“改动这个方法会影响哪些接口”，它只能凭记忆猜测，或者再次全盘扫描。
 
----
-
-## 🌟 核心特性与“组装成熟工具”哲学
-
-1. **🌳 组装工业级 `tree-sitter`（6 大主流语言调用拓扑与语法解析）**：
-   - 彻底摆脱单一语言限制！接入 GitHub / Neovim 底层的统一语法树引擎 **Tree-sitter**。
-   - 天然支持 **Python、TypeScript、JavaScript、Go、Java (Spring Boot)、Rust** 混合大仓库。精准提取类（Class/Struct/Trait/Interface/Record/Enum）、方法、参数签名、注释文档与 API 路由，并支持按需调用图追踪。
-2. **🧭 吸收 CodeGraph 优秀设计：一键手术级探索 (`explore_codebase`)**：
-   - **消灭 AI 的“探索税 (Exploration Tax)”**！传统方式 AI 需要反复执行 5~10 轮 `grep` 和 `read_file` 才能理清链路。
-   - `explore_codebase` **仅需 1 次工具调用**，自动聚合命中入口、外部 HTTP 路由、上游触发方、下游依赖与关键源码证据，极速节省上下文与 Token。
-3. **💥 改动爆炸半径 / 影响面分析 (`get_impact_radius`)**：
-   - 在重构或修改核心公共函数前调用，通过有向图 BFS 扩散自动推导受波及的上游模块、代码文件与外部 API 路由，防止改出未预料的线上回归 Bug。
-4. **📞 确定性代码图谱调用链追踪 (`get_symbol_callers` / `get_symbol_callees`)**：
-   - 毫秒级回答“谁调用了函数 X”与“函数 X 内部调了哪些下级服务”，无需向量模型开销，100% 确定性。
-5. **⚡ 组装内置工业级 `ripgrep`（毫秒级精准事实与证据）**：
-   - 项目内置官方预编译 `rg.exe` 静态二进制（支持 AVX2 SIMD 硬件加速与 PCRE2 正则）。
-   - 面对确切的类名、常量、错误码、URL 路由或环境变量，0 毫秒精确召回，提供 **100% 确凿证据（Exact Match）**，绝无模型幻觉。
-6. **🏛️ 全局多语言架构大纲地图（极省 Token 理清大项目）**：
-   - 提供 `get_codebase_outline` 工具。面对混合多语言大项目，AI 无需盲目全盘搜索或读入大文件，仅花费数百 Token 即可瞬间获取项目全貌与核心模块职责。
-7. **🎯 4 路倒数排名融合 (RRF) + 驼峰/下划线智能分词**：
-   - 针对自然语言提问与英文长标识符（如 `verifyJwtTokenSignature`），自动拆解自然语言语义并经由 Vector + FTS + Ripgrep + AST 结构评分经由 $RRF\_Score = \sum \frac{1}{k + rank_i}$ 统一融合，召回率与准确度兼备。
-8. **🌐 Web 框架与路由注解深度感知**：
-   - 原生支持 **FastAPI / Flask / Express / NestJS / Go Gin / Spring Boot (@GetMapping 等) / Rust Actix-web (#[get(...)])**。自动提取路由信息并注入语义向量与大纲。
-9. **🔒 零外部服务与零污染存储**：
-   - 嵌入式单文件运行，无需 Docker。数据库统一保存在 `~/.code-search-mcp/` 全局缓存，对被检索项目源码与 Git 状态零污染。
-10. **📡 实时热监听与毫秒级增量更新 (File Watcher & Incremental Sync)**：
-   - 彻底解决“代码修改后搜索滞后”痛点！基于操作系统原生内核事件通知（Windows `ReadDirectoryChangesW` / Linux `inotify` / macOS `FSEvents`）。
-   - 1500ms 智能防抖聚合连续保存，单文件变更 0.3s 内完成 Tree-sitter AST 抽取与 LanceDB 向量增量覆盖，无需全盘重建。
-   - 零输出污染，后台热监听日志严格流向 `sys.stderr`，绝不破坏 MCP JSON-RPC 协议通信。
+**`code-search-mcp` 的目的很简单：把代码库的结构预先索引好，让 Agent 在 1 次工具调用内拿到准确的上下文，不再盲目翻找文件。**
 
 ---
 
-## 🏗️ 组装分工架构
+## 它是怎么工作的 (How It Works)
 
-```text
-┌────────────────────────────────────────────────────────┐
-│  AI Agent（Claude Code / Cursor / Codex）               │
-│  "帮我探索用户登录流程并分析密码哈希改动影响面"        │
-└───────────┬────────────────────────────────┬───────────┘
-            │ 1. 架构探索 / 影响面 / 图谱    │ 2. 语义搜索 / 确切字面量
-┌───────────▼────────────────────────────────▼───────────┐
-│  code-search-mcp (全栈代码情报与知识图谱中台)          │
-│                                                        │
-│  ┌────────────────────┐   ┌────────────────────────┐   │
-│  │  ripgrep 工业引擎  │   │  tree-sitter 多语言解析│   │
-│  │  内置 SIMD 硬件加速│   │  Py/TS/JS/Go/Java/Rust │   │
-│  └─────────┬──────────┘   └───────────┬────────────┘   │
-│            │                          │                │
-│  ┌─────────▼──────────────────────────▼────────────┐   │
-│  │  CodeGraph 图谱推理引擎 (Caller/Callee/Impact)   │   │
-│  │  LanceDB + fastembed 本地语义向量存储与 4路 RRF │   │
-│  └─────────────────────┬───────────────────────────┘   │
-│                        │                               │
-│  ┌─────────────────────▼───────────────────────────┐   │
-│  │  手术级上下文聚合器 (1 次 Tool Call 返回完整证据链) │   │
-│  └─────────────────────────────────────────────────┘   │
-└────────────────────────────────────────────────────────┘
+- **Tree-sitter 符号提取**：解析 Python、TypeScript、JavaScript、Go、Java、Rust 源码，提取函数、类、接口、结构体和路由注解。
+- **调用图与影响面 (Call Graph & Impact)**：基于 SQLite 构建符号关系拓扑。回答“谁调用了 X”（`callers`）和“修改 X 会波及哪些上游与 API 路由”（`impact`），毫秒级响应，无需依赖向量模型。
+- **4 路 RRF 混合检索**：结合 Dense 向量（bge-small-zh）、LanceDB 词法检索（FTS）、内置 ripgrep 精确匹配和 AST 符号结构匹配，自动做驼峰/下划线分词（例如 `verifyJwtToken` 拆解为自然语言），大幅提高代码搜索召回率。
+- **架构大纲 (Outline)**：生成全局多语言模块骨架地图，仅消耗数百 Token 即可让 Agent 快速理清项目全貌。
+- **实时热更新 (Watcher)**：基于操作系统的内核文件事件（`ReadDirectoryChangesW` / `inotify` / `FSEvents`），保存代码时 0.3 秒内增量更新，无需手动重新索引。
+- **低内存流式设计**：采用 300 块微批次流式写入与垃圾回收，常驻内存保持在 150MB 以下，避免大仓库向量化时 OOM。对于超过 2,000 文件的超大仓库，支持自动降级为免向量结构图模式。
+
+---
+
+## 快速上手 (Quickstart)
+
+### 1. 一键安装并配置客户端（推荐）
+
+通过 `uvx` 直接运行安装向导，它会自动检测你机器上的 AI 客户端并写入 MCP 配置：
+
+```bash
+uvx code-search-mcp install
 ```
 
----
+或者使用 `pip`：
 
-## ⚡ 一键极速上手（一条命令自动配置）
-
-无需手动找路径、无需手动手写修改 JSON 配置文件，支持全自动跨客户端配置与最佳实践规范注入：
-
-### 方式 1: `pip` 一行安装（PyPI 官方发布）
 ```bash
 pip install code-search-mcp
 code-search-mcp install
 ```
 
-### 方式 2: `uvx` 免安装一键搞定（最推荐，开箱即用）
-```bash
-# 自动探测系统内所有 AI 客户端并完成 MCP 挂载与规则初始化
-uvx code-search-mcp install
-```
+向导会自动识别并配置：
+- **Claude Code** (`~/.claude.json`)
+- **Cursor** (`.cursor/mcp.json` 与全局配置)
+- **Claude Desktop** (`claude_desktop_config.json`)
+- **Windsurf** / **VS Code (Cline / Roo Code)**
 
-### 方式 3: 本地克隆一键安装
-```bash
-git clone https://github.com/wangfenghuan/code-search.git
-cd code-search
-python install.py
-# 或使用 uv:
-uv run code-search-mcp install
-```
-
-> **自动化完成全部流程**：
-> - ✅ 自动识别并合并写入 **Claude Code** (`~/.claude.json`)
-> - ✅ 自动识别并合并写入 **Cursor** (`.cursor/mcp.json` 及用户全局设置)
-> - ✅ 自动识别并合并写入 **Claude Desktop** (`claude_desktop_config.json`，Windows/macOS/Linux)
-> - ✅ 自动识别并合并写入 **Windsurf** 与 **VS Code (Cline / Roo Code)**
-> - ✅ 自动为项目生成 **`CLAUDE.md`** 与 **`.cursorrules`** 最佳实践使用规范（吸收 CodeGraph 规范，防止 AI 泛滥读大文件导致上下文爆炸）
+同时会在项目根目录生成 `CLAUDE.md` 与 `.cursorrules`，指导 Agent 优先使用结构化工具检索，避免全盘读文件。
 
 ---
 
-## 🛠️ 手动配置参考（可选）
+### 2. 手动配置 MCP
 
-如果你习惯手动维护客户端配置文件，也可自行添加以下配置块：
+如果你习惯手动维护配置，直接在客户端的 `mcpServers` 中添加：
 
-### 1. 配置到 Claude Code
+**Claude Code:**
 ```bash
 claude mcp add code-search-mcp -- uvx code-search-mcp serve
 ```
 
-### 2. 配置到 Claude Desktop / Cursor
-在对应客户端的 `mcpServers` 下追加：
+**Cursor / Claude Desktop / Windsurf (`mcp.json`):**
 ```json
 {
   "mcpServers": {
@@ -133,80 +78,98 @@ claude mcp add code-search-mcp -- uvx code-search-mcp serve
 }
 ```
 
-### 3. Docker 容器化运行（零环境依赖）
-```bash
-# 构建镜像
-docker build -t code-search-mcp:latest .
-
-# 启动容器
-docker run -i --rm -v "$(pwd):/workspace" code-search-mcp:latest serve
-```
-> 📖 详细 Docker 命令请参阅 [Docker 完整部署指南 (docs/docker_guide.md)](docs/docker_guide.md)。
-
 ---
 
-## 🧰 提供的 10 个核心 MCP 工具
+## MCP 工具列表 (Tools)
 
-| 工具名 | 入参 | 适用场景与优势 |
+服务暴露了以下 MCP 工具供 Agent 调用：
+
+| 工具名 | 参数 | 功能说明 |
 |---|---|---|
-| `explore_codebase` | `query: str`, `path: str = ""`, `top_k: int = 2` | **【旗舰级一键探索（启发自 CodeGraph）】** 1 次调用直出全链路业务上下文。聚合入口路由、核心实现、上下游依赖与源码证据，彻底避免多次调用 read/grep 翻找文件。 |
-| `get_impact_radius` | `symbol_name: str`, `path: str = ""`, `max_depth: int = 3` | **【改动爆炸半径分析】** 改动函数前调用，分析受波及的上游模块、代码文件与外部 Web/API 路由，防止改漏改错。 |
-| `get_symbol_callers` | `symbol_name: str`, `path: str = ""` | **【Call Graph 上游调用追踪】** 查找代码库中谁调用了该函数或类，返回调用位置与代码预览。 |
-| `get_symbol_callees` | `symbol_name: str`, `path: str = ""` | **【Call Graph 下游依赖追踪】** 查找指定函数直接调用的下级依赖，标明是否在仓库内定义。 |
-| `get_codebase_outline` | `path: str = ""` | **【理清大项目首选】** 全局多语言骨架树与模块职责摘要（仅耗费 ~500 Token），避免盲目全盘搜索。 |
-| `exact_search` | `pattern: str`, `path: str = ""`, `is_regex: bool = False`, `file_glob: str = ""` | **【内置 ripgrep 确凿证据】** 0 毫秒精准查找变量、常量、错误码、配置 Key 或正则，返回 100% 确凿事实。 |
-| `search_codebase` | `query: str`, `path: str = ""`, `top_k: int = 5`, `compact: bool = True` | **【核心语义检索】** 混合自然语言与符号精准加权，跨 Python/TS/JS/Go 语言召回。默认 `compact=True` 极简预览，节省 75% Token。 |
-| `get_watch_status` | `path: str = ""` | **【实时热监听状态与同步历史】** 实时查看当前代码库热更新监控器运行状态、防抖延迟配置与最近 10 次增量更新事件。 |
-| `get_file_content` | `path: str`, `start_line: int`, `end_line: int` | **【精准展开】** 配合检索结果，按需深入阅读目标函数完整实现代码。 |
-| `index_codebase` | `path: str` | 扫描多语言目标项目，Tree-sitter 提取 AST、调用边、Web 路由并构建本地向量库与知识图，自动激活后台实时热监听。 |
+| `explore_codebase` | `query`, `path?`, `top_k?` | **全链路业务探索**：单次调用聚合入口路由、核心实现、上下游依赖与关键源码，代替反复读文件。 |
+| `get_impact_radius` | `symbol_name`, `path?`, `max_depth?` | **改动爆炸半径**：分析修改指定符号后受波及的上游函数、文件及外部 API 路由，防止改出线上 Bug。 |
+| `get_symbol_callers` | `symbol_name`, `path?` | **查找调用方**：追踪谁调用了该函数/类，返回调用位置与代码片段。 |
+| `get_symbol_callees` | `symbol_name`, `path?` | **查找下游依赖**：列出指定函数内部调用的所有下级方法/服务。 |
+| `get_codebase_outline` | `path?` | **架构大纲**：提取多语言骨架树与模块职责（~500 Token），适合刚进入项目时理清结构。 |
+| `exact_search` | `pattern`, `path?`, `is_regex?`, `file_glob?` | **ripgrep 精确搜索**：内置静态编译 ripgrep 二进制，用于查找确切常量、配置项、错误码或正则。 |
+| `search_codebase` | `query`, `path?`, `top_k?`, `compact?` | **4 路混合语义搜索**：融合向量相似度、FTS、ripgrep 与 AST 排名，查找业务逻辑实现。 |
+| `get_file_content` | `path`, `start_line`, `end_line` | **代码片段读取**：按需查看目标函数的完整实现代码。 |
+| `index_codebase` | `path`, `skip_vector?`, `force_vector?` | **索引项目**：解析 AST 并建立 SQLite 图谱与向量库，自动激活后台增量热监听。 |
+| `get_watch_status` | `path?` | **监听状态**：查看后台文件热监听器的运行状态与最近更新记录。 |
 
 ---
 
-## 💻 本地 CLI 命令行调试
+## 命令行工具 (CLI)
+
+除了通过 MCP 给 Agent 使用，`code-search-mcp` 还提供了完整的命令行交互工具（基于 Typer 构建）：
 
 ```bash
-# 1. 索引多语言代码库 (自动识别 Python/TS/JS/Go/Java/Rust 符号与架构大纲)
-uv run main.py index /path/to/project
+# 索引代码库（超过 2000 文件自动跳过向量仅建结构图；可用 --force-vector 强制生成向量）
+code-search-mcp index /path/to/project
 
-# 2. 一键直达手术级业务全链路探索 (CodeGraph 风格)
-uv run main.py explore "用户登录认证与密码加密校验流程" -p /path/to/project
+# 架构大纲预览
+code-search-mcp outline -p /path/to/project
 
-# 3. 改动影响面 / 爆炸半径分析 (重构前必查)
-uv run main.py impact "hash_password" -p /path/to/project
+# 4 路混合搜索
+code-search-mcp search "用户登录认证" -p /path/to/project
 
-# 4. 上下游调用关系追踪
-uv run main.py callers "verify_password" -p /path/to/project
-uv run main.py callees "AuthService.login" -p /path/to/project
+# ripgrep 精确字面量/正则搜索
+code-search-mcp exact "SECRET_KEY" -p /path/to/project
 
-# 5. 打印多语言架构大纲地图 (超省 Token)
-uv run main.py outline /path/to/project
+# 追踪函数调用方与下游依赖
+code-search-mcp callers "verify_password" -p /path/to/project
+code-search-mcp callees "AuthService.login" -p /path/to/project
 
-# 6. 内置 ripgrep 精准字面量/正则检索 (带确凿证据)
-uv run main.py exact "SECRET_KEY" --path /path/to/project
-uv run main.py exact "PaymentGateway" --path /path/to/project
+# 改动影响面分析（改动前评估）
+code-search-mcp impact "User" --depth 3 -p /path/to/project
 
-# 7. 跨语言语义与符号混合搜索（4 路 RRF 融合，紧凑模式）
-uv run main.py search "在线支付与订单退款" --path /path/to/project
+# 一键业务链路探索
+code-search-mcp explore "订单退款流程" -p /path/to/project
 
-# 8. 启动前台实时热更新文件监控器 (自动防抖增量更新)
-uv run main.py watch /path/to/project --debounce 1500
+# 启动前台文件热监听
+code-search-mcp watch -p /path/to/project
 
-# 9. 作为 MCP stdio 服务启动
-uv run main.py serve
+# 查看与清理索引缓存
+code-search-mcp cache
+code-search-mcp clean --orphaned
 ```
 
 ---
 
-## 🧪 运行测试套件
+## 支持语言与框架
 
-内置全套多语言 Tree-sitter 切片、调用拓扑提取、爆炸半径分析、一键全链路探索、跨语言混合检索与 9 大 MCP 工具的端到端测试：
-
-```bash
-uv run python tests/test_search.py
-```
+| 语言 | 语法引擎 | 提取能力 | 框架路由感知 |
+|---|---|---|---|
+| **Python** | Tree-sitter | 函数、类、方法、装饰器、Docstring、调用点 | FastAPI, Flask |
+| **TypeScript / JavaScript** | Tree-sitter | 函数、类、Interface、Type、Arrow Function、调用点 | Express, NestJS |
+| **Go** | Tree-sitter | 函数、结构体、方法、Interface、调用点 | Gin, 标准库 `http` |
+| **Java** | Tree-sitter | 类、方法、构造函数、接口、包名、构造注入推断 | Spring Boot (`@GetMapping`, `@RestController` 等) |
+| **Rust** | Tree-sitter | 函数、Struct、Enum、Trait、Impl 块、调用点 | Actix-web, Axum |
 
 ---
 
-## 📄 开源许可证
+## 实测指标 (Benchmarks)
 
-Apache License 2.0.
+在标准开发者机器上实测：
+
+- **FastAPI 核心代码库 (1,171 文件 / 6,545 符号)**：
+  - 索引耗时：38 秒
+  - 内存峰值：< 450 MB（无 OOM）
+  - 调用方查询延迟：< 15 ms
+- **Spring PetClinic (50 文件 / 250 符号)**：
+  - 首次冷启动索引：40 秒（含模型初始化与向量构建）
+  - 增量热更新缓存：1.7 秒
+  - `OwnerRepository` 调用方：准确定位 11 个跨文件调用点与 HTTP 路由
+
+---
+
+## 数据与隐私
+
+- **100% 本地运行**：模型（`bge-small-zh-v1.5`）通过 ONNX Runtime 在本地运行，代码、向量与图数据均保存在本地机器上。
+- **缓存目录隔离**：所有索引数据库统一保存在 `~/.code-search-mcp/` 全局缓存目录下，不会向你的项目目录写入临时文件，对 Git 状态零污染。
+
+---
+
+## 开源协议
+
+MIT License.
