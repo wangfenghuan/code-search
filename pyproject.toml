@@ -1,5 +1,5 @@
 [project]
-name = "code-search-mcp"
+name = "code-search-graph"
 version = "0.8.0"
 description = "Fast, intelligent, multi-language code search and AST call graph MCP server for AI assistants (Python, TypeScript, JavaScript, Go, Java, Rust)"
 readme = "README.md"
@@ -64,6 +64,7 @@ Changelog = "https://github.com/wangfenghuan/code-search/releases"
 
 [project.scripts]
 code-search-mcp = "code_search_mcp:main"
+code-search-graph = "code_search_mcp:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -78,6 +79,7 @@ requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
+module-name = "code_search_mcp"
 source-exclude = [
     "src/code_search_mcp/models/**",
 ]

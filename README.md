@@ -98,10 +98,10 @@ Install via `pip` or run instantly with `uvx`:
 
 ```bash
 # Via pip
-pip install code-search-mcp
+pip install code-search-graph
 
 # Or run zero-install via uvx
-uvx code-search-mcp install
+uvx code-search-graph install
 ```
 
 ### 2. Wire up your agent(s)
@@ -295,9 +295,11 @@ code-search-mcp             [█                                       ] 1,150  
 
 ```bash
 # 1. 安装 CLI (通过 pip 或免安装 uvx)
-pip install code-search-mcp
+pip install code-search-graph
 
 # 2. 自动配置 AI 客户端 (自动检测 Claude Code / Cursor / Windsurf 并写入 MCP 配置与规则)
+code-search-graph install
+# 或者使用别名
 code-search-mcp install
 
 # 3. 索引项目 (大仓库自动进入免向量轻量模式，毫秒级就绪)
