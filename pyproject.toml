@@ -1,6 +1,6 @@
 [project]
 name = "code-search-mcp"
-version = "0.1.0"
+version = "0.8.0"
 description = "Fast, intelligent, multi-language code search and AST call graph MCP server for AI assistants (Python, TypeScript, JavaScript, Go, Java, Rust)"
 readme = "README.md"
 license = { text = "MIT" }
