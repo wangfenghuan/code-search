@@ -4,7 +4,54 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+import typer.rich_utils as _ru
 from rich.console import Console
+
+# 全局本地化 Typer / Rich Click 面板标题与常用文案
+_ru.ARGUMENTS_PANEL_TITLE = "参数列表 (Arguments)"
+_ru.OPTIONS_PANEL_TITLE = "可用选项 (Options)"
+_ru.COMMANDS_PANEL_TITLE = "子命令列表 (Commands)"
+_ru.ERRORS_PANEL_TITLE = "错误提示 (Errors)"
+_ru.ABORTED_TEXT = "已中止操作。"
+_ru.DEFAULT_STRING = "[默认值: {}]"
+_ru.REQUIRED_LONG_STRING = "[必填]"
+_ru.REQUIRED_SHORT_STRING = "[必填]"
+_ru.ENVVAR_STRING = "[环境变量: {}]"
+
+# 本地化 Click / Typer 内部帮助选项与命令用法前缀
+_orig_get_param_help = _ru._get_parameter_help
+
+
+def _custom_get_param_help(*, param, ctx, markup_mode):
+    h = getattr(param, "help", None)
+    if h == "Show this message and exit.":
+        param.help = "显示此帮助信息并退出。"
+    elif h == "Install completion for the current shell.":
+        param.help = "为当前 Shell 安装自动补全脚本。"
+    elif h == "Show completion for the current shell, to copy it or customize the installation.":
+        param.help = "展示当前 Shell 的自动补全配置脚本。"
+    return _orig_get_param_help(param=param, ctx=ctx, markup_mode=markup_mode)
+
+
+_ru._get_parameter_help = _custom_get_param_help
+
+_orig_format_help = _ru.rich_format_help
+
+
+def _custom_rich_format_help(*, obj, ctx, markup_mode):
+    orig_get_usage = obj.get_usage
+
+    def _zh_get_usage(ctx):
+        u = orig_get_usage(ctx)
+        if u.startswith("Usage: "):
+            return "用法: " + u[7:]
+        return u
+
+    obj.get_usage = _zh_get_usage
+    return _orig_format_help(obj=obj, ctx=ctx, markup_mode=markup_mode)
+
+
+_ru.rich_format_help = _custom_rich_format_help
 
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
