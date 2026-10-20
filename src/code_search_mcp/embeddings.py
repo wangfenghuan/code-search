@@ -5,7 +5,7 @@ from typing import Generator, Iterable, List, Optional, Sequence
 import numpy as np
 from fastembed import TextEmbedding
 
-from code_search_mcp.config import DEFAULT_MODEL_NAME
+from code_search_mcp.config import DEFAULT_MODEL_NAME, get_cache_root
 
 
 _PROBED_PROVIDERS: Optional[List[str]] = None
@@ -88,10 +88,15 @@ class EmbeddingEngine:
                 threads=threads,
             )
         else:
+            models_cache = str(get_cache_root() / "models")
+            # 为国内用户默认提供稳定镜像源兜底
+            if "HF_ENDPOINT" not in os.environ:
+                os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
             sys.stderr.write(f"[code-search-mcp] 正在加载 Embedding 模型: {self.model_name} [硬件后端: {hw_desc}, 并行线程: {threads}]\n")
             sys.stderr.flush()
             model = TextEmbedding(
                 model_name=self.model_name,
+                cache_dir=models_cache,
                 providers=providers,
                 threads=threads,
             )
