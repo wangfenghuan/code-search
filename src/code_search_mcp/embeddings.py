@@ -92,7 +92,7 @@ class EmbeddingEngine:
             # 为国内用户默认提供稳定镜像源兜底
             if "HF_ENDPOINT" not in os.environ:
                 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-            sys.stderr.write(f"[code-search-mcp] 正在加载 Embedding 模型: {self.model_name} [硬件后端: {hw_desc}, 并行线程: {threads}]\n")
+            sys.stderr.write(f"[code-search-mcp] Loading embedding model: {self.model_name} [backend: {hw_desc}, threads: {threads}]\n")
             sys.stderr.flush()
             model = TextEmbedding(
                 model_name=self.model_name,
@@ -100,7 +100,7 @@ class EmbeddingEngine:
                 providers=providers,
                 threads=threads,
             )
-        sys.stderr.write(f"[code-search-mcp] 模型加载完成，向量维度已就绪\n")
+        sys.stderr.write(f"[code-search-mcp] Model loaded successfully\n")
         sys.stderr.flush()
         return model
 

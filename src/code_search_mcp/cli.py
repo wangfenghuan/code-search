@@ -4,54 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-import typer.rich_utils as _ru
 from rich.console import Console
-
-# 全局本地化 Typer / Rich Click 面板标题与常用文案
-_ru.ARGUMENTS_PANEL_TITLE = "参数列表 (Arguments)"
-_ru.OPTIONS_PANEL_TITLE = "可用选项 (Options)"
-_ru.COMMANDS_PANEL_TITLE = "子命令列表 (Commands)"
-_ru.ERRORS_PANEL_TITLE = "错误提示 (Errors)"
-_ru.ABORTED_TEXT = "已中止操作。"
-_ru.DEFAULT_STRING = "[默认值: {}]"
-_ru.REQUIRED_LONG_STRING = "[必填]"
-_ru.REQUIRED_SHORT_STRING = "[必填]"
-_ru.ENVVAR_STRING = "[环境变量: {}]"
-
-# 本地化 Click / Typer 内部帮助选项与命令用法前缀
-_orig_get_param_help = _ru._get_parameter_help
-
-
-def _custom_get_param_help(*, param, ctx, markup_mode):
-    h = getattr(param, "help", None)
-    if h == "Show this message and exit.":
-        param.help = "显示此帮助信息并退出。"
-    elif h == "Install completion for the current shell.":
-        param.help = "为当前 Shell 安装自动补全脚本。"
-    elif h == "Show completion for the current shell, to copy it or customize the installation.":
-        param.help = "展示当前 Shell 的自动补全配置脚本。"
-    return _orig_get_param_help(param=param, ctx=ctx, markup_mode=markup_mode)
-
-
-_ru._get_parameter_help = _custom_get_param_help
-
-_orig_format_help = _ru.rich_format_help
-
-
-def _custom_rich_format_help(*, obj, ctx, markup_mode):
-    orig_get_usage = obj.get_usage
-
-    def _zh_get_usage(ctx):
-        u = orig_get_usage(ctx)
-        if u.startswith("Usage: "):
-            return "用法: " + u[7:]
-        return u
-
-    obj.get_usage = _zh_get_usage
-    return _orig_format_help(obj=obj, ctx=ctx, markup_mode=markup_mode)
-
-
-_ru.rich_format_help = _custom_rich_format_help
 
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
@@ -71,7 +24,7 @@ from code_search_mcp.ui import (
     print_watch_banner,
 )
 
-# 确保在 Windows 控制台环境下正常输出 UTF-8
+# Ensure UTF-8 output on Windows consoles
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -83,20 +36,20 @@ if sys.platform == "win32":
 app = typer.Typer(
     name="code-search-mcp",
     help="""
-⚡ code-search-mcp: 本地轻量代码语义搜索与图谱分析引擎 (AST + Vector + BM25 + Ripgrep)
+⚡ code-search-mcp: Local lightweight code semantic search & structural graph engine (AST + Vector + BM25 + Ripgrep)
 
-常用命令示例 (Examples):
-  code-search-mcp index .                           # 扫描并为当前代码库构建语义与 AST 索引
-  code-search-mcp search "用户登录认证与密码校验"   # 语义混合检索 (高亮语法代码块)
-  code-search-mcp exact "hash_password"             # 使用 ripgrep 极速精准字面量/正则查找
-  code-search-mcp outline                           # 生成多语言全局架构骨架大纲 (极省 Token)
-  code-search-mcp explore "用户注册与鉴权流程"      # 一键全链路业务手术级探索 (CodeGraph 风格)
-  code-search-mcp callers "verify_token"            # 查询谁调用了指定函数或类
-  code-search-mcp callees "AuthService.login"       # 查询指定函数直接依赖调用的下游符号
-  code-search-mcp impact "User" --depth 3           # 改动爆炸半径分析 (跨文件反向传递)
-  code-search-mcp cache                             # 查看全局索引缓存清单与磁盘占用
-  code-search-mcp clean --orphaned                  # 一键安全清理孤儿幽灵缓存释放空间
-  code-search-mcp install                           # 一键向导式配置 Claude/Cursor/Windsurf MCP
+Common Examples:
+  code-search-mcp index .                           # Scan & index repository with vector embeddings & AST
+  code-search-mcp search "user auth and token"      # Hybrid semantic code search (with syntax highlighting)
+  code-search-mcp exact "hash_password"             # Ultra-fast exact literal / regex search via ripgrep
+  code-search-mcp outline                           # Multi-language high-level architecture map (token saver)
+  code-search-mcp explore "user login & auth flow"  # End-to-end surgical feature exploration (CodeGraph-style)
+  code-search-mcp callers "verify_token"            # Find who calls a specific function or class
+  code-search-mcp callees "AuthService.login"       # Find downstream dependencies called by a function
+  code-search-mcp impact "User" --depth 3           # Blast-radius impact analysis (cross-file reverse propagation)
+  code-search-mcp cache                             # View global index cache entries & disk usage
+  code-search-mcp clean --orphaned                  # Safely clean orphaned caches to free disk space
+  code-search-mcp install                           # One-click auto-config for Claude / Cursor / Windsurf MCP
 """,
     add_completion=False,
     no_args_is_help=False,
@@ -106,9 +59,9 @@ app = typer.Typer(
 
 @app.callback(invoke_without_command=True)
 def main_callback(ctx: typer.Context):
-    """code-search-mcp 核心入口与全局调度"""
+    """code-search-mcp core entry point and dispatcher"""
     if ctx.invoked_subcommand is None:
-        # 如果不是在交互式终端运行（如 Claude Desktop / Cursor 等以 stdio 管道接入），启动 MCP 服务
+        # If not running in an interactive terminal (e.g. piped stdio from Claude Desktop / Cursor), launch MCP server
         if not sys.stdin.isatty():
             run_server()
         else:
@@ -117,49 +70,49 @@ def main_callback(ctx: typer.Context):
             raise typer.Exit(code=0)
 
 
-@app.command("serve", help="以 MCP stdio 协议启动服务")
+@app.command("serve", help="Start server with MCP stdio protocol")
 def serve_cmd():
     run_server()
 
 
-@app.command("index", help="扫描并索引指定代码库")
+@app.command("index", help="Scan and index the specified repository")
 def index_cmd(
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="代码库根目录路径（位置参数，与 --path 等价，默认当前目录）",
+        help="Repository root path (positional argument, equivalent to --path, default: current directory)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="代码库根目录路径（与位置参数等价，默认当前目录）",
+        help="Repository root path (equivalent to positional argument, default: current directory)",
     ),
     skip_vector: bool = typer.Option(
         False,
         "--skip-vector",
-        help="跳过向量嵌入，仅构建 CodeGraph 结构调用图与架构大纲（超大仓库秒级索引，零内存压力）",
+        help="Skip vector embeddings, build only structural call graph and outline (instant indexing, zero RAM load)",
     ),
     force_vector: bool = typer.Option(
         False,
         "--force-vector",
-        help="强制启用全量流式向量嵌入（即使仓库源文件数超过阈值）",
+        help="Force full streaming vector embeddings even if source files exceed threshold",
     ),
     threshold: int = typer.Option(
         2000,
         "--threshold",
-        help="自动切换轻量模式的文件数阈值（默认 2000）",
+        help="File count threshold to automatically switch to lightweight mode (default: 2000)",
     ),
 ):
     raw_path = path or positional_path or "."
     target = Path(raw_path).resolve()
     if not target.exists() or not target.is_dir():
-        print_error(f"目标路径 '{target}' 不存在或非目录")
+        print_error(f"Target path '{target}' does not exist or is not a directory")
         raise typer.Exit(code=1)
 
     indexer = CodeIndexer(target)
     t0 = time.perf_counter()
-    with console.status(f"[bold cyan]正在解析代码库并构建向量与 AST 索引 ({target.name})...[/bold cyan]", spinner="dots"):
+    with console.status(f"[bold cyan]Parsing codebase and building AST & vector index ({target.name})...[/bold cyan]", spinner="dots"):
         res = indexer.index_all(
             skip_vector=skip_vector,
             force_vector=force_vector,
@@ -169,119 +122,119 @@ def index_cmd(
     print_index_result(res, elapsed_seconds=elapsed)
 
 
-@app.command("outline", help="查看代码库全局架构大纲地图")
+@app.command("outline", help="Show codebase high-level architecture outline map")
 def outline_cmd(
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="代码库根目录路径（位置参数，与 --path 等价，默认当前或最近索引项目）",
+        help="Repository root path (positional argument, default: current or most recently indexed repo)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="目标代码库路径（默认当前或最近索引项目）",
+        help="Target repository path (default: current or most recently indexed repo)",
     ),
 ):
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
-        print_error("未找到目标代码库")
+        print_error("Target repository not found")
         raise typer.Exit(code=1)
 
-    with console.status("[bold cyan]正在提取代码库全局架构骨架地图...[/bold cyan]", spinner="dots"):
+    with console.status("[bold cyan]Extracting codebase architectural outline map...[/bold cyan]", spinner="dots"):
         gen = ProjectOutlineGenerator(target)
         outline_data = gen.get_cached_or_generate()
     print_markdown(gen.format_as_markdown(outline_data))
 
 
-@app.command("search", help="语义搜索已索引的代码")
+@app.command("search", help="Semantic hybrid search across indexed code")
 def search_cmd(
-    query: str = typer.Argument(..., help="自然语言搜索关键词"),
+    query: str = typer.Argument(..., help="Natural language search query or keywords"),
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="目标代码库路径（位置参数，与 --path 等价）",
+        help="Target repository path (positional argument, equivalent to --path)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="目标代码库路径（默认当前或最近索引项目）",
+        help="Target repository path (default: current or most recently indexed repo)",
     ),
     top_k: int = typer.Option(
         5,
         "--top-k",
         "-k",
-        help="返回结果数量（默认 5）",
+        help="Number of results to return (default: 5)",
     ),
     full: bool = typer.Option(
         False,
         "--full",
-        help="是否输出完整代码（默认紧凑模式节省 Token）",
+        help="Output full code snippets instead of compact preview",
     ),
 ):
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
-        print_error("未找到目标代码库，请先执行 index 命令")
+        print_error("Target repository not found. Please run 'index' first.")
         raise typer.Exit(code=1)
 
     searcher = CodeSearcher(target)
     if not searcher.is_indexed():
-        console.print(f"[yellow]提示: 代码库 '{target}' 尚未建立索引，正在为您自动建立初始索引...[/yellow]")
+        console.print(f"[yellow]Notice: Repository '{target}' is not yet indexed. Creating initial index now...[/yellow]")
         indexer = CodeIndexer(target)
         indexer.index_all()
 
-    with console.status("[bold cyan]正在执行混合多路召回检索 (RRF + Vector + BM25)...[/bold cyan]", spinner="dots"):
+    with console.status("[bold cyan]Performing hybrid multi-channel search (RRF + Vector + BM25)...[/bold cyan]", spinner="dots"):
         results = searcher.search(query, top_k=top_k)
     print_search_results(results, query, target, compact=not full)
 
 
-@app.command("exact", help="使用 ripgrep 极速精准字面量/正则搜索")
+@app.command("exact", help="Fast exact literal or regex search via ripgrep")
 def exact_cmd(
-    pattern: str = typer.Argument(..., help="要搜索的确切文本或正则表达式"),
+    pattern: str = typer.Argument(..., help="Exact string or regular expression to search for"),
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="目标代码库路径（位置参数，与 --path 等价）",
+        help="Target repository path (positional argument, equivalent to --path)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="目标代码库路径（默认当前或最近索引项目）",
+        help="Target repository path (default: current or most recently indexed repo)",
     ),
     regex: bool = typer.Option(
         False,
         "--regex",
         "-r",
-        help="启用正则表达式匹配",
+        help="Enable regular expression matching",
     ),
     case_sensitive: bool = typer.Option(
         False,
         "--case-sensitive",
         "-c",
-        help="区分大小写",
+        help="Case-sensitive matching",
     ),
     glob: str = typer.Option(
         "",
         "--glob",
         "-g",
-        help="文件通配符过滤（如 '*.py'）",
+        help="File glob filter (e.g. '*.py')",
     ),
     max_results: int = typer.Option(
         20,
         "--max",
         "-m",
-        help="最大结果数量（默认 20）",
+        help="Maximum number of results (default: 20)",
     ),
 ):
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
-        print_error("未找到目标代码库")
+        print_error("Target repository not found")
         raise typer.Exit(code=1)
 
     engine = ExactSearchEngine(target)
-    with console.status(f"[bold magenta]正在调用 Ripgrep 极速检索: {pattern}...[/bold magenta]", spinner="dots"):
+    with console.status(f"[bold magenta]Searching via Ripgrep: {pattern}...[/bold magenta]", spinner="dots"):
         res = engine.search(
             pattern=pattern,
             is_regex=regex,
@@ -292,159 +245,159 @@ def exact_cmd(
     print_exact_results(res)
 
 
-@app.command("explore", help="一键直达全链路业务探索（CodeGraph 风格）")
+@app.command("explore", help="End-to-end surgical feature exploration (CodeGraph style)")
 def explore_cmd(
-    query: str = typer.Argument(..., help="业务问题或功能描述"),
+    query: str = typer.Argument(..., help="Feature question or workflow description"),
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="目标代码库路径（位置参数，与 --path 等价）",
+        help="Target repository path (positional argument, equivalent to --path)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="目标代码库路径",
+        help="Target repository path",
     ),
     top_k: int = typer.Option(
         2,
         "--top-k",
         "-k",
-        help="聚合的核心入口数（默认 2）",
+        help="Number of core entry points to aggregate (default: 2)",
     ),
 ):
     from code_search_mcp.graph_engine import CodeGraphEngine
 
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
-        print_error("未找到目标代码库")
+        print_error("Target repository not found")
         raise typer.Exit(code=1)
 
     engine = CodeGraphEngine(target)
-    with console.status(f"[bold cyan]正在执行业务全链路拓扑分析: {query}...[/bold cyan]", spinner="dots"):
+    with console.status(f"[bold cyan]Analyzing topological feature flow: {query}...[/bold cyan]", spinner="dots"):
         res = engine.explore_feature(query, top_k=top_k)
     if res.get("status") == "success":
         print_markdown(res.get("surgical_context_markdown", ""))
     else:
-        print_error(res.get("message", "探索失败"))
+        print_error(res.get("message", "Exploration failed"))
         raise typer.Exit(code=1)
 
 
-@app.command("callers", help="查询谁调用了指定函数或类")
+@app.command("callers", help="Find who calls a specific function or class")
 def callers_cmd(
-    symbol: str = typer.Argument(..., help="目标符号名称"),
+    symbol: str = typer.Argument(..., help="Target symbol name"),
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="目标代码库路径（位置参数，与 --path 等价）",
+        help="Target repository path (positional argument, equivalent to --path)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="目标代码库路径",
+        help="Target repository path",
     ),
 ):
     from code_search_mcp.graph_engine import CodeGraphEngine, format_callers_markdown
 
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
-        print_error("未找到目标代码库")
+        print_error("Target repository not found")
         raise typer.Exit(code=1)
 
     engine = CodeGraphEngine(target)
-    with console.status(f"[bold cyan]正在追踪 '{symbol}' 的上游调用方...[/bold cyan]", spinner="dots"):
+    with console.status(f"[bold cyan]Tracing upstream callers for '{symbol}'...[/bold cyan]", spinner="dots"):
         res = engine.get_callers(symbol)
     print_markdown(format_callers_markdown(res))
 
 
-@app.command("callees", help="查询指定函数直接调用的下游模块")
+@app.command("callees", help="Find downstream functions directly called by a symbol")
 def callees_cmd(
-    symbol: str = typer.Argument(..., help="目标符号名称"),
+    symbol: str = typer.Argument(..., help="Target symbol name"),
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="目标代码库路径（位置参数，与 --path 等价）",
+        help="Target repository path (positional argument, equivalent to --path)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="目标代码库路径",
+        help="Target repository path",
     ),
 ):
     from code_search_mcp.graph_engine import CodeGraphEngine, format_callees_markdown
 
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
-        print_error("未找到目标代码库")
+        print_error("Target repository not found")
         raise typer.Exit(code=1)
 
     engine = CodeGraphEngine(target)
-    with console.status(f"[bold cyan]正在追踪 '{symbol}' 的下游依赖调用...[/bold cyan]", spinner="dots"):
+    with console.status(f"[bold cyan]Tracing downstream dependencies for '{symbol}'...[/bold cyan]", spinner="dots"):
         res = engine.get_callees(symbol)
     print_markdown(format_callees_markdown(res))
 
 
-@app.command("impact", help="改动影响面/爆炸半径分析")
+@app.command("impact", help="Analyze change impact blast-radius")
 def impact_cmd(
-    symbol: str = typer.Argument(..., help="准备修改的目标符号"),
+    symbol: str = typer.Argument(..., help="Target symbol to modify"),
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="目标代码库路径（位置参数，与 --path 等价）",
+        help="Target repository path (positional argument, equivalent to --path)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="目标代码库路径",
+        help="Target repository path",
     ),
     depth: int = typer.Option(
         3,
         "--depth",
         "-d",
-        help="追踪最大层级（默认 3）",
+        help="Maximum traversal depth (default: 3)",
     ),
 ):
     from code_search_mcp.graph_engine import CodeGraphEngine, format_impact_markdown
 
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
-        print_error("未找到目标代码库")
+        print_error("Target repository not found")
         raise typer.Exit(code=1)
 
     engine = CodeGraphEngine(target)
-    with console.status(f"[bold cyan]正在计算 '{symbol}' 的改动爆炸半径...[/bold cyan]", spinner="dots"):
+    with console.status(f"[bold cyan]Calculating blast radius for '{symbol}'...[/bold cyan]", spinner="dots"):
         res = engine.get_impact_radius(symbol, max_depth=depth)
     print_markdown(format_impact_markdown(res))
 
 
-@app.command("watch", help="启动前台实时热更新文件监控器")
+@app.command("watch", help="Start live hot-reloading repository file watcher")
 def watch_cmd(
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="代码库根目录路径（位置参数，与 --path 等价，默认当前或最近索引项目）",
+        help="Repository root path (positional argument, default: current or most recently indexed repo)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="目标代码库路径（默认当前或最近索引项目）",
+        help="Target repository path (default: current or most recently indexed repo)",
     ),
     debounce: int = typer.Option(
         1500,
         "--debounce",
         "-d",
-        help="防抖延迟毫秒数（默认 1500ms）",
+        help="Debounce delay in milliseconds (default: 1500ms)",
     ),
 ):
     from code_search_mcp.watcher import RepoWatcher
 
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
-        print_error("未找到目标代码库")
+        print_error("Target repository not found")
         raise typer.Exit(code=1)
 
     print_watch_banner(target, debounce)
@@ -456,33 +409,33 @@ def watch_cmd(
             time.sleep(0.5)
     except KeyboardInterrupt:
         watcher.stop()
-        console.print("\n[bold yellow]👋 已安全停止监控[/bold yellow]\n")
+        console.print("\n[bold yellow]👋 File watcher safely stopped[/bold yellow]\n")
 
 
-@app.command("install", help="一键全自动安装并配置 Claude/Cursor/Windsurf/Cline MCP 与规范")
+@app.command("install", help="One-click auto-installer for Claude/Cursor/Windsurf/Cline MCP")
 def install_cmd(
     clients: str = typer.Option(
         "all",
         "--clients",
         "-c",
-        help="要配置的目标客户端（如 claude-code,cursor 或 all，默认 all）",
+        help="Target clients to configure (e.g. claude-code,cursor or all, default: all)",
     ),
     mode: str = typer.Option(
         "auto",
         "--mode",
         "-m",
-        help="MCP 启动运行模式（auto / uvx / uv / python / docker，默认 auto 自动检测）",
+        help="MCP execution mode (auto / uvx / uv / python / docker, default: auto)",
     ),
     repo: str = typer.Option(
         "",
         "--repo",
         "-r",
-        help="目标代码库根目录路径（用于初始化规则，默认当前目录）",
+        help="Target repository path for rules initialization (default: current directory)",
     ),
     no_rules: bool = typer.Option(
         False,
         "--no-rules",
-        help="跳过自动写入 CLAUDE.md 与 .cursorrules 规范",
+        help="Skip writing CLAUDE.md and .cursorrules rules",
     ),
 ):
     from code_search_mcp.installer import run_installer
@@ -497,12 +450,12 @@ def install_cmd(
     )
 
 
-@app.command("cache", help="查看全局索引缓存清单与磁盘占用")
+@app.command("cache", help="View global index cache entries and disk usage")
 def cache_cmd(
     json_output: bool = typer.Option(
         False,
         "--json",
-        help="以 JSON 格式输出统计信息",
+        help="Output statistics in JSON format",
     ),
 ):
     import json
@@ -531,41 +484,41 @@ def cache_cmd(
         print_cache_table(summary, entries)
 
 
-@app.command("clean", help="清理代码库索引缓存与无用临时数据")
+@app.command("clean", help="Clean index caches and temporary data")
 def clean_cmd(
     positional_path: Optional[str] = typer.Argument(
         None,
         metavar="[PATH]",
-        help="目标代码库路径（位置参数，与 --path 等价）",
+        help="Target repository path (positional argument, equivalent to --path)",
     ),
     path: Optional[str] = typer.Option(
         None,
         "--path",
         "-p",
-        help="仅清理指定代码库的缓存（默认当前或指定项目）",
+        help="Only clean cache for specified repository",
     ),
     all_caches: bool = typer.Option(
         False,
         "--all",
         "-a",
-        help="清空所有代码库的缓存数据",
+        help="Clear caches for all repositories",
     ),
     orphaned: bool = typer.Option(
         False,
         "--orphaned",
         "-o",
-        help="仅清理项目源目录已不存在的孤儿幽灵缓存（默认推荐）",
+        help="Only clean orphaned caches whose source directories no longer exist (recommended)",
     ),
     days: Optional[int] = typer.Option(
         None,
         "--days",
         "-d",
-        help="清理超过指定天数未更新的陈旧缓存",
+        help="Clean caches older than specified days",
     ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="模拟预览将要清理的内容和释放的磁盘空间，不实际删除",
+        help="Preview what would be cleaned and freed space without deleting",
     ),
 ):
     from code_search_mcp.cache_manager import CacheManager

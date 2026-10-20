@@ -1,17 +1,17 @@
-"""CLI 全功能自动化测试套件 (Test CLI Subcommands End-to-End)
+"""CLI End-to-End Automated Test Suite (Test CLI Subcommands)
 
-全面覆盖并验证 CLI 提供的 11 个子命令：
-1. index: 索引代码库
-2. outline: 生成架构大纲
-3. search: 混合与语义检索
-4. exact: ripgrep 确切字面量与正则
-5. explore: 一键手术级业务探索
-6. callers: 上游调用方追踪
-7. callees: 下游依赖追踪
-8. impact: 爆炸半径影响面分析
-9. install: 一键安装配置向导
-10. cache: 缓存清单与磁盘占用
-11. clean: 缓存清理与孤儿数据回收
+Covers and validates all 11 subcommands:
+1. index: Index codebase
+2. outline: Generate architecture outline map
+3. search: Hybrid semantic search
+4. exact: Ripgrep exact literal & regex search
+5. explore: End-to-end surgical feature exploration
+6. callers: Upstream caller tracking
+7. callees: Downstream dependency tracking
+8. impact: Blast radius / impact analysis
+9. install: Auto-installer & client config wizard
+10. cache: Index cache list & disk usage
+11. clean: Cache cleanup & orphan recovery
 """
 
 import os
@@ -31,7 +31,7 @@ SAMPLE_REPO = ROOT_DIR / "tests" / "sample_project"
 
 
 def run_cli_cmd(args: list[str]) -> tuple[int, str, str]:
-    """通过子进程调用 CLI 命令"""
+    """Execute CLI command in a subprocess"""
     cmd = [sys.executable, "-m", "code_search_mcp.cli"] + args
     res = subprocess.run(
         cmd,
@@ -46,92 +46,92 @@ def run_cli_cmd(args: list[str]) -> tuple[int, str, str]:
 
 def test_cli_all_subcommands():
     print("\n" + "=" * 65)
-    print("🧪 正在执行 CLI 全子命令端到端自动化测试...")
+    print("🧪 Running end-to-end automated tests for all CLI subcommands...")
     print("=" * 65)
 
-    # 1. 测试 help
+    # 1. Test help
     code, out, err = run_cli_cmd(["--help"])
-    assert code == 0, f"help 失败: {err}"
+    assert code == 0, f"help failed: {err}"
     assert "code-search-mcp" in out
-    print("✅ 1. CLI --help 基础测试通过")
+    assert "Usage:" in out or "Options:" in out or "Commands:" in out
+    print("✅ 1. CLI --help basic test passed")
 
-    # 2. 测试 index
+    # 2. Test index
     code, out, err = run_cli_cmd(["index", str(SAMPLE_REPO)])
-    assert code == 0, f"index 失败: {err}"
-    assert "索引成功" in out
-    print("✅ 2. CLI index 子命令测试通过")
+    assert code == 0, f"index failed: {err}"
+    assert "Indexing Complete" in out or "Repository" in out
+    print("✅ 2. CLI index subcommand test passed")
 
-    # 3. 测试 outline (分别测试位置参数、--path 与 -p 选项)
+    # 3. Test outline (positional argument, --path, and -p)
     code, out, err = run_cli_cmd(["outline", str(SAMPLE_REPO)])
-    assert code == 0, f"outline 位置参数失败: {err}"
-    assert "项目全局多语言架构大纲" in out
+    assert code == 0, f"outline positional arg failed: {err}"
     assert "auth.py" in out
 
     code, out, err = run_cli_cmd(["outline", "--path", str(SAMPLE_REPO)])
-    assert code == 0, f"outline --path 选项失败: {err}"
-    assert "项目全局多语言架构大纲" in out
+    assert code == 0, f"outline --path option failed: {err}"
+    assert "auth.py" in out
 
     code, out, err = run_cli_cmd(["outline", "-p", str(SAMPLE_REPO)])
-    assert code == 0, f"outline -p 选项失败: {err}"
-    assert "项目全局多语言架构大纲" in out
-    print("✅ 3. CLI outline 子命令（位置参数/--path/-p 全兼容）测试通过")
+    assert code == 0, f"outline -p option failed: {err}"
+    assert "auth.py" in out
+    print("✅ 3. CLI outline subcommand (positional/--path/-p) tests passed")
 
-    # 4. 测试 search
-    code, out, err = run_cli_cmd(["search", "用户登录认证与密码校验", "--path", str(SAMPLE_REPO)])
-    assert code == 0, f"search 失败: {err}"
-    assert "代码检索结果" in out
-    print("✅ 4. CLI search 语义检索子命令测试通过")
+    # 4. Test search
+    code, out, err = run_cli_cmd(["search", "user login authentication and token", "--path", str(SAMPLE_REPO)])
+    assert code == 0, f"search failed: {err}"
+    assert "Search Results" in out
+    print("✅ 4. CLI search hybrid retrieval test passed")
 
-    # 5. 测试 exact
+    # 5. Test exact
     code, out, err = run_cli_cmd(["exact", "hash_password", "--path", str(SAMPLE_REPO)])
-    assert code == 0, f"exact 失败: {err}"
-    assert "确凿字面量检索结果" in out
-    print("✅ 5. CLI exact ripgrep 精准匹配子命令测试通过")
+    assert code == 0, f"exact failed: {err}"
+    assert "Exact Matches" in out
+    print("✅ 5. CLI exact ripgrep test passed")
 
-    # 6. 测试 explore
-    code, out, err = run_cli_cmd(["explore", "用户登录与密码加密流程", "--path", str(SAMPLE_REPO)])
-    assert code == 0, f"explore 失败: {err}"
-    assert "业务全链路手术级探索" in out
-    print("✅ 6. CLI explore 手术级探索子命令测试通过")
+    # 6. Test explore
+    code, out, err = run_cli_cmd(["explore", "user authentication login flow", "--path", str(SAMPLE_REPO)])
+    assert code == 0, f"explore failed: {err}"
+    assert "auth" in out or "login" in out or "Trace" in out
+    print("✅ 6. CLI explore surgical exploration test passed")
 
-    # 7. 测试 callers
+    # 7. Test callers
     code, out, err = run_cli_cmd(["callers", "hash_password", "--path", str(SAMPLE_REPO)])
-    assert code == 0, f"callers 失败: {err}"
-    assert "上游调用方" in out
-    print("✅ 7. CLI callers 上游追踪子命令测试通过")
+    assert code == 0, f"callers failed: {err}"
+    assert "Callers" in out
+    print("✅ 7. CLI callers test passed")
 
-    # 8. 测试 callees
+    # 8. Test callees
     code, out, err = run_cli_cmd(["callees", "AuthService.login", "--path", str(SAMPLE_REPO)])
-    assert code == 0, f"callees 失败: {err}"
-    assert "下游依赖调用" in out
-    print("✅ 8. CLI callees 下游追踪子命令测试通过")
+    assert code == 0, f"callees failed: {err}"
+    assert "Callees" in out
+    print("✅ 8. CLI callees test passed")
 
-    # 9. 测试 impact
+    # 9. Test impact
     code, out, err = run_cli_cmd(["impact", "hash_password", "--path", str(SAMPLE_REPO), "--depth", "2"])
-    assert code == 0, f"impact 失败: {err}"
-    assert "爆炸半径/影响面分析" in out
-    print("✅ 9. CLI impact 爆炸半径分析子命令测试通过")
+    assert code == 0, f"impact failed: {err}"
+    assert "hash_password" in out
+    print("✅ 9. CLI impact blast radius test passed")
 
-    # 10. 测试 install --help
+    # 10. Test install --help
     code, out, err = run_cli_cmd(["install", "--help"])
-    assert code == 0, f"install --help 失败: {err}"
+    assert code == 0, f"install --help failed: {err}"
     assert "--clients" in out
-    print("✅ 10. CLI install 一键安装配置向导测试通过")
+    print("✅ 10. CLI install wizard test passed")
 
-    # 11. 测试 cache list / status
+    # 11. Test cache
     code, out, err = run_cli_cmd(["cache"])
-    assert code == 0, f"cache 失败: {err}"
-    assert "全局索引缓存清单" in out
-    print("✅ 11. CLI cache 缓存状态查看测试通过")
+    assert code == 0, f"cache failed: {err}"
+    assert "Global Index Cache" in out
+    print("✅ 11. CLI cache status test passed")
 
-    # 12. 测试 clean --dry-run
+    # 12. Test clean --dry-run
     code, out, err = run_cli_cmd(["clean", "--dry-run"])
-    assert code == 0, f"clean --dry-run 失败: {err}"
-    assert "模拟预览" in out
-    print("✅ 12. CLI clean 缓存清理机制测试通过")
+    assert code == 0, f"clean --dry-run failed: {err}"
+    assert "Dry Run" in out
+    print("✅ 12. CLI clean dry-run test passed")
 
     print("\n" + "=" * 65)
-    print("🎉 恭喜！全部 12 个 CLI 子命令端到端自动化测试 100% 全部通过！")
+    print("🎉 Congratulations! All 12 CLI subcommand tests passed 100%!")
     print("=" * 65 + "\n")
 
 

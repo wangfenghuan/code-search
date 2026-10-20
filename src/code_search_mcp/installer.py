@@ -199,45 +199,43 @@ def run_installer(
 ) -> None:
     """执行一键安装配置向导"""
     print("\n" + "=" * 65)
-    print("🚀 code-search-mcp 一键极速安装与客户端自动配置向导")
+    print("🚀 code-search-mcp Auto-Installer & Client Configuration Wizard")
     print("=" * 65)
 
     all_paths = get_client_config_paths()
     repo = target_repo or Path.cwd().resolve()
 
-    # 自动探测最佳启动模式
+    # Automatically detect optimal launch mode
     if mode == "auto":
-        # 如果是在本仓库源码目录下运行且存在 uv.lock 或 .venv，优先使用当前 Python 环境
         venv_py = repo / ".venv" / ("Scripts" if platform.system() == "Windows" else "bin") / ("python.exe" if platform.system() == "Windows" else "python")
         if venv_py.exists():
             selected_mode = "python"
             py_path = str(venv_py)
-            print(f"📦 检测到本地虚拟环境: {py_path}")
+            print(f"📦 Detected local virtualenv: {py_path}")
         elif shutil.which("uvx"):
             selected_mode = "uvx"
             py_path = None
-            print("📦 检测到系统已安装 uvx，将使用免安装极速执行模式 (uvx code-search-mcp)")
+            print("📦 Detected uvx installed, using zero-install execution mode (uvx code-search-mcp)")
         elif shutil.which("uv"):
             selected_mode = "uv"
             py_path = None
-            print("📦 检测到系统已安装 uv，将使用 uv run 模式")
+            print("📦 Detected uv installed, using uv run mode")
         else:
             selected_mode = "python"
             py_path = sys.executable
-            print(f"📦 使用当前 Python 解释器: {py_path}")
+            print(f"📦 Using Python interpreter: {py_path}")
     else:
         selected_mode = mode
         py_path = sys.executable
 
     server_config = build_server_config(mode=selected_mode, python_path=py_path, repo_path=str(repo))
 
-    # 确定要配置的客户端清单
     if clients and "all" not in clients:
         selected_clients = clients
     else:
         selected_clients = list(all_paths.keys())
 
-    print("\n🔍 正在扫描并自动配置 AI 客户端...")
+    print("\n🔍 Scanning and configuring AI clients...")
     configured_count = 0
 
     for client_name in selected_clients:
@@ -245,11 +243,9 @@ def run_installer(
             continue
         cfg_path = all_paths[client_name]
 
-        # 如果是父目录存在或者是当前工作区，积极创建配置
         parent_exists = cfg_path.parent.exists()
         is_workspace = "workspace" in client_name or client_name == "claude-code"
 
-        # 判断是否应该写入
         should_write = parent_exists or is_workspace or cfg_path.exists()
         if should_write:
             ok, msg = safe_merge_json(cfg_path, "code-search-mcp", server_config)
@@ -258,22 +254,21 @@ def run_installer(
             if ok:
                 configured_count += 1
         else:
-            print(f"  ⏭️  [{client_name.upper()}] 未检测到安装目录 ({cfg_path.parent})，已跳过")
+            print(f"  ⏭️  [{client_name.upper()}] Directory not found ({cfg_path.parent}), skipped")
 
-    # 写入工作区规范
     if write_rules:
-        print(f"\n📝 正在为代码库配置 AI 工具使用规范 (CLAUDE.md & .cursorrules)...")
+        print(f"\n📝 Setting up workspace rules (CLAUDE.md & .cursorrules)...")
         rule_logs = setup_workspace_rules(repo)
         for rlog in rule_logs:
             print(f"  {rlog}")
 
     print("\n" + "=" * 65)
-    print(f"🎉 安装配置完成！共为 {configured_count} 个客户端配置了 MCP Server。")
-    print("💡 使用方式:")
-    print("   1. 重启你的 Claude Desktop / Cursor / Claude Code；")
-    print("   2. 在对话框中即可直接使用:")
-    print("      - explore_codebase: 业务功能全链路一键直达探索")
-    print("      - get_codebase_outline: 极省 Token 的多语言项目架构地图")
-    print("      - get_impact_radius: 修改核心代码前的改动爆炸半径分析")
-    print("      - exact_search: 基于 ripgrep 的极速精准字面量与正则查找")
+    print(f"🎉 Installation complete! Configured MCP Server for {configured_count} client(s).")
+    print("💡 Next steps:")
+    print("   1. Restart your Claude Desktop / Cursor / Claude Code;")
+    print("   2. You can now use the following tools directly in chat:")
+    print("      - explore_codebase: One-click surgical feature exploration")
+    print("      - get_codebase_outline: High-level multi-language architecture map")
+    print("      - get_impact_radius: Blast-radius impact analysis before refactoring")
+    print("      - exact_search: Ripgrep-powered exact literal and regex search")
     print("=" * 65 + "\n")
