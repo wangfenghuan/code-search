@@ -1,45 +1,45 @@
-# 🐳 Docker 部署与 AI 客户端接入指南
+# 🐳 Docker Deployment & AI Client Integration Guide
 
-通过 Docker 容器化运行 `code-search-mcp`，无需在宿主机安装任何 Python、Tree-sitter 或 Rust 工具链。镜像内部已**预置官方 ripgrep 引擎与 BAAI 中文向量模型权重**，启动即用，100% 离线支持。
-
----
-
-## 🚀 1. 构建 Docker 镜像
-
-在项目根目录下执行：
-
-```bash
-docker build -t code-search-mcp:latest .
-```
-
-> 💡 **构建预热设计**：在镜像构建过程中，会自动预下载 `BAAI/bge-small-zh-v1.5`（~90MB）并缓存至镜像中。容器启动时**无需等待模型下载，0.5 秒极速冷启动**。
+Run `code-search-graph` inside a lightweight Docker container with zero setup. No need to install Python, Tree-sitter, or Rust toolchains on the host. The container bundles the ripgrep binary and pre-warmed BAAI vector embedding weights for 100% offline support.
 
 ---
 
-## 🔌 2. 配置到主流 AI 编程助手
+## 🚀 1. Build Docker Image
 
-### A. 配置到 Claude Code (通过 Docker)
-
-在你的代码项目根目录下执行：
+From the repository root:
 
 ```bash
-claude mcp add code-search -- docker run -i --rm -v "$(pwd):/workspace:ro" -v "code-search-cache:/root/.code-search-mcp" code-search-mcp:latest serve
+docker build -t code-search-graph:latest .
 ```
 
-或在 `~/.claude.json` 中配置：
+> 💡 **Build-time Model Pre-warming**: During `docker build`, `BAAI/bge-small-zh-v1.5` (~90MB) is downloaded and cached in the image layer. Container startup requires zero download time, enabling sub-second cold starts.
+
+---
+
+## 🔌 2. Configure AI Coding Clients
+
+### A. Claude Code (via Docker)
+
+Run directly in your project root:
+
+```bash
+claude mcp add code-search-graph -- docker run -i --rm -v "$(pwd):/workspace:ro" -v "code-search-cache:/root/.code-search-graph" code-search-graph:latest serve
+```
+
+Or configure manually in `~/.claude.json`:
 
 ```json
 {
   "mcpServers": {
-    "code-search": {
+    "code-search-graph": {
       "command": "docker",
       "args": [
         "run",
         "-i",
         "--rm",
         "-v", "${workspaceFolder}:/workspace:ro",
-        "-v", "code-search-cache:/root/.code-search-mcp",
-        "code-search-mcp:latest",
+        "-v", "code-search-cache:/root/.code-search-graph",
+        "code-search-graph:latest",
         "serve"
       ]
     }
@@ -49,51 +49,51 @@ claude mcp add code-search -- docker run -i --rm -v "$(pwd):/workspace:ro" -v "c
 
 ---
 
-### B. 配置到 Cursor (通过 Docker)
+### B. Cursor (via Docker)
 
-打开 Cursor：**Settings -> Features -> MCP Servers -> Add New MCP Server**：
+In Cursor: **Settings -> Features -> MCP Servers -> Add New MCP Server**:
 
-- **Name**: `code-search`
+- **Name**: `code-search-graph`
 - **Type**: `command`
 - **Command**:
   ```bash
-  docker run -i --rm -v /绝对路径/你的代码库:/workspace:ro -v code-search-cache:/root/.code-search-mcp code-search-mcp:latest serve
+  docker run -i --rm -v /absolute/path/to/your/repo:/workspace:ro -v code-search-cache:/root/.code-search-graph code-search-graph:latest serve
   ```
 
-> ⚠️ **关键参数说明**：
-> - `-i`（Interactive）：保持标准输入（STDIN）开启，这是 MCP JSON-RPC 协议通信的必备参数。
-> - `--rm`：容器退出时自动清理容器实例。
-> - `-v /path:/workspace:ro`：将待分析的代码库以只读形式挂载至容器。容器会自动优先推断 `/workspace` 作为分析目标。
-> - `-v code-search-cache:/root/.code-search-mcp`：持久化索引数据库，避免每次重启重复建库。
+> ⚠️ **Key Arguments**:
+> - `-i` (Interactive): Keeps standard input (STDIN) open, mandatory for MCP JSON-RPC stdio protocol.
+> - `--rm`: Automatically removes the container instance on exit.
+> - `-v /path:/workspace:ro`: Mounts the repository read-only. The server defaults to `/workspace` if no repository path is supplied.
+> - `-v code-search-cache:/root/.code-search-graph`: Persists the LanceDB and SQLite index databases across runs.
 
 ---
 
-## 💻 3. 本地命令行通过 Docker 使用
+## 💻 3. Docker CLI Usage
 
-无需启动 MCP 客户端，直接使用 Docker 容器执行代码搜索与图谱分析：
+Run searches and graph analysis directly using Docker without an MCP client:
 
 ```bash
-# 1. 对代码库建立索引
-docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-mcp" code-search-mcp:latest index /workspace
+# 1. Index codebase
+docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-graph" code-search-graph:latest index /workspace
 
-# 2. 查看架构大纲地图 (超省 Token)
-docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-mcp" code-search-mcp:latest outline
+# 2. View architecture outline
+docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-graph" code-search-graph:latest outline
 
-# 3. 一键手术级全链路业务探索 (CodeGraph 模式)
-docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-mcp" code-search-mcp:latest explore "用户登录认证与密码校验流程"
+# 3. Explore full feature workflow
+docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-graph" code-search-graph:latest explore "user authentication and login verification flow"
 
-# 4. 改动影响面 / 爆炸半径分析
-docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-mcp" code-search-mcp:latest impact "hash_password"
+# 4. Impact radius analysis
+docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-graph" code-search-graph:latest impact "hash_password"
 
-# 5. 上游调用追踪
-docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-mcp" code-search-mcp:latest callers "verify_password"
+# 5. Upstream caller trace
+docker run --rm -v "$(pwd):/workspace" -v "code-search-cache:/root/.code-search-graph" code-search-graph:latest callers "verify_password"
 ```
 
 ---
 
-## 🛠️ 4. 使用一键脚本
+## 🛠️ 4. Quick Scripts
 
-仓库内置了跨平台快捷启动脚本：
+The repository includes cross-platform launcher scripts:
 
 - **Linux / macOS**:
   ```bash

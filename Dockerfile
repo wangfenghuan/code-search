@@ -1,11 +1,11 @@
 # ==============================================================================
-# code-search-mcp: 全栈代码知识图谱与语义搜索 MCP 服务
-# 100% 纯本地运行，预置 Embedding 模型权重与 ripgrep，零外部网络依赖
+# code-search-graph: Full-stack Code Intelligence & FastMCP Engine
+# 100% local execution, pre-bundled embedding models & ripgrep, zero network dependency
 # ==============================================================================
 
 FROM python:3.10-slim AS base
 
-# 1. 安装基础依赖与系统级 ripgrep (Linux 平台原生运行)
+# 1. Install base dependencies and system ripgrep
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     git \
@@ -13,32 +13,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. 从官方镜像获取极速包管理器 uv
+# 2. Get uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# 3. 设置工作目录与环境变量
+# 3. Working directory and environment variables
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
-    CODE_SEARCH_CACHE_DIR=/root/.code-search-mcp
+    CODE_SEARCH_CACHE_DIR=/root/.code-search-graph
 
-# 4. 利用 Docker 缓存层，优先同步依赖
+# 4. Dependency caching layer
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# 5. 复制项目所有源码
+# 5. Copy project source code
 COPY . .
 
-# 6. 【核心加速设计】在构建阶段预下载 FastEmbed 中文模型权重 (BAAI/bge-small-zh-v1.5)
-# 彻底消除容器运行时联网下载延迟，实现毫秒级即时启动，支持离线/内网环境
-RUN uv run python -c "from fastembed import TextEmbedding; print('[Docker Build] 预热下载本地向量模型...'); TextEmbedding('BAAI/bge-small-zh-v1.5'); print('[Docker Build] 模型预热就绪！')"
+# 6. Pre-warm embedding model weights during build to eliminate runtime download delay
+RUN uv run python -c "from fastembed import TextEmbedding; print('[Docker Build] Pre-warming embedding model...'); TextEmbedding('BAAI/bge-small-zh-v1.5'); print('[Docker Build] Pre-warm complete!')"
 
-# 7. 创建数据卷挂载点：
-# /workspace: 挂载待分析的宿主机代码仓库 (只读即可)
-# /root/.code-search-mcp: 挂载 LanceDB 向量库与架构索引持久化目录
-RUN mkdir -p /workspace /root/.code-search-mcp
-VOLUME ["/workspace", "/root/.code-search-mcp"]
+# 7. Volume mount points:
+# /workspace: Mount host repository (read-only)
+# /root/.code-search-graph: LanceDB & cache persistence
+RUN mkdir -p /workspace /root/.code-search-graph
+VOLUME ["/workspace", "/root/.code-search-graph"]
 
-# 8. 默认以 MCP stdio 协议运行，对接 Claude Code / Cursor
+# 8. FastMCP stdio server entrypoint
 ENTRYPOINT ["uv", "run", "main.py"]
 CMD ["serve"]

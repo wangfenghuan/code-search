@@ -127,12 +127,12 @@ class ProjectOutlineGenerator:
         return self.generate()
 
     def format_as_markdown(self, outline: Dict[str, Any], max_depth: int = 3) -> str:
-        """将多语言架构大纲转化为紧凑结构、极省 Token 的 Markdown"""
-        repo_name = outline.get("repo_name", "项目")
+        """Format architecture outline into compact token-efficient Markdown"""
+        repo_name = outline.get("repo_name", "Codebase")
         total_modules = outline.get("total_modules", 0)
         lines = [
-            f"# 🏛️ 项目全局多语言架构大纲: {repo_name} (共 {total_modules} 个核心源文件)\n",
-            "> 💡 **使用提示**: 此大纲展示项目所有 Python/TS/JS/Go 模块职责与暴露符号。请优先根据大纲定位模块，再使用 `search_codebase` 或 `exact_search` 精准查看细节。\n",
+            f"# 🏛️ Architecture Outline: {repo_name} ({total_modules} source files)\n",
+            "> 💡 **Usage Tip**: This outline summarizes module responsibilities and exported symbols. Identify relevant modules here first, then call `search_codebase` or `exact_search` for line-level details.\n",
         ]
 
         modules = outline.get("modules", [])
@@ -149,7 +149,7 @@ class ProjectOutlineGenerator:
                 c_sum = f" ({c['summary']})" if c.get("summary") else ""
                 methods_str = ", ".join(f"`{m}()`" for m in c.get("methods", []))
                 if methods_str:
-                    lines.append(f"  - **{c_type}** `{c_name}`{c_sum} 包含方法: {methods_str}")
+                    lines.append(f"  - **{c_type}** `{c_name}`{c_sum} methods: {methods_str}")
                 else:
                     lines.append(f"  - **{c_type}** `{c_name}`{c_sum}")
 
@@ -158,7 +158,7 @@ class ProjectOutlineGenerator:
                 fn_name = fn["name"]
                 fn_sum = f" ({fn['summary']})" if fn.get("summary") else ""
                 route_str = f" `[{fn['route']}]`" if fn.get("route") else ""
-                lines.append(f"  - **函数** `{fn_name}()`{route_str}{fn_sum}")
+                lines.append(f"  - **function** `{fn_name}()`{route_str}{fn_sum}")
 
             lines.append("")
 

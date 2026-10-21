@@ -1,14 +1,14 @@
 <div align="center">
 
-# code-search-mcp
+# code-search-graph
 
 ### Supercharge Claude Code, Cursor, Codex, Windsurf, Gemini, Antigravity, Cline, and Copilot with Multi-Language Code Intelligence
 
 **Zero-config code graph · 4-way RRF hybrid search · surgical context · built for how agents actually work · 100% local**
 
-[ English ](#code-search-mcp) · [ 中文说明 ](#-中文说明)
+[ English ](#code-search-graph) · [ 中文说明 ](#-中文说明)
 
-[![PyPI version](https://img.shields.io/pypi/v/code-search-mcp.svg)](https://pypi.org/project/code-search-mcp/)
+[![PyPI version](https://img.shields.io/pypi/v/code-search-graph.svg)](https://pypi.org/project/code-search-graph/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://python.org)
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#supported-platforms)
@@ -28,7 +28,7 @@
 
 ## Contents / 目录
 
-- [Why code-search-mcp?](#why-code-search-mcp)
+- [Why code-search-graph?](#why-code-search-graph)
   - [Benchmark Results](#benchmark-results)
 - [Get Started](#get-started)
   - [1. Install the CLI](#1-install-the-cli)
@@ -50,11 +50,11 @@
 
 ---
 
-## Why code-search-mcp?
+## Why code-search-graph?
 
 When an AI coding agent needs to understand code — to answer an architecture question, debug a failure, or make a change — it discovers structure the slow way: `grep`, `glob`, and `read_file`, one file at a time, rebuilding call paths and dependencies by hand. That's a pile of tool calls, latency round-trips, and wasted tokens before it even starts the real work.
 
-**code-search-mcp hands the agent the exact code it needs in one call.** It's a pre-built knowledge graph of every symbol, call edge, and route definition in your codebase — so instead of crawling files, the agent asks one question and gets back:
+**code-search-graph hands the agent the exact code it needs in one call.** It's a pre-built knowledge graph of every symbol, call edge, and route definition in your codebase — so instead of crawling files, the agent asks one question and gets back:
 1. The entry point route handler,
 2. The core implementation,
 3. The upstream callers and downstream callee dependencies,
@@ -67,16 +67,16 @@ Discovery Cost (Tokens processed to reach an answer, lower is better):
 Vanilla Agent (grep/read loop)  [████████████████████████████████████████] 38,500 (100%)
 Naive Vector RAG (no graph)     [███████████████████                     ] 18,200 (47.2%)
 Pure Symbol Graph (no vector)   [█████                                   ] 4,800  (12.5%)
-code-search-mcp                 [█                                       ] 1,150  (3.0%, -97% tokens)
+code-search-graph                 [█                                       ] 1,150  (3.0%, -97% tokens)
 ```
 
 > **A note on cost:** In traditional file-by-file exploration, **over 80% of tokens are burned reading the wrong files** or parsing redundant grep outputs. `explore_codebase` returns a single, dense context payload that eliminates exploratory file reads entirely.
 >
-> **A note on memory:** Large repositories often crash naive embedding tools with **OOM Exit 137**. `code-search-mcp` processes code in streaming micro-batches of 300 chunks with eager garbage collection, keeping peak memory **under 160MB** even on 8,000+ file projects.
+> **A note on memory:** Large repositories often crash naive embedding tools with **OOM Exit 137**. `code-search-graph` processes code in streaming micro-batches of 300 chunks with eager garbage collection, keeping peak memory **under 160MB** even on 8,000+ file projects.
 
 ### Benchmark Results
 
-Tested across real-world open-source codebases, comparing an agent answering an architecture and impact question **with** and **without** `code-search-mcp`:
+Tested across real-world open-source codebases, comparing an agent answering an architecture and impact question **with** and **without** `code-search-graph`:
 
 | Codebase | Language / Size | Tool calls | Time | File reads | Tokens | Peak RAM |
 |---|---|---|---|---|---|---|
@@ -85,7 +85,7 @@ Tested across real-world open-source codebases, comparing an agent answering an 
 | **Spring PetClinic**| Java · ~50 files / 250 symbols | **1 vs 12** | **1.7s (hot) vs 48s** | **0** vs 8 | 97% fewer | **< 160 MB** |
 | **Gin** | Go · ~110 files / 820 symbols | **1 vs 7** | **2.1s vs 35s** | **0** vs 5 | 92% fewer | **< 110 MB** |
 
-- **File reads cut to 0**: The agent never has to open raw files when `code-search-mcp` is present.
+- **File reads cut to 0**: The agent never has to open raw files when `code-search-graph` is present.
 - **Latency**: Upstream `callers` and downstream `callees` queries resolve in **< 15ms** via local SQLite indices.
 
 ---
@@ -109,7 +109,7 @@ uvx code-search-graph install
 Run the interactive installer. It automatically detects your installed AI coding agents and configures their MCP settings:
 
 ```bash
-code-search-mcp install
+code-search-graph install
 ```
 
 The installer auto-configures:
@@ -127,16 +127,16 @@ If you prefer to configure manually:
 
 **Claude Code:**
 ```bash
-claude mcp add code-search-mcp -- uvx code-search-mcp serve
+claude mcp add code-search-graph -- uvx code-search-graph serve
 ```
 
 **Cursor / Windsurf / Claude Desktop (`mcp.json`):**
 ```json
 {
   "mcpServers": {
-    "code-search-mcp": {
+    "code-search-graph": {
       "command": "uvx",
-      "args": ["code-search-mcp", "serve"]
+      "args": ["code-search-graph", "serve"]
     }
   }
 }
@@ -147,7 +147,7 @@ claude mcp add code-search-mcp -- uvx code-search-mcp serve
 In your project directory, run:
 
 ```bash
-code-search-mcp index .
+code-search-graph index .
 ```
 
 - Repositories under 2,000 files build dense vector embeddings + SQLite call graph.
@@ -156,14 +156,14 @@ code-search-mcp index .
 
 ### 4. Always Fresh (Auto-Sync)
 
-No manual re-syncing needed. `code-search-mcp` includes a native OS kernel file watcher (`ReadDirectoryChangesW` on Windows, `inotify` on Linux, `FSEvents` on macOS). When you save a file, it re-parses AST symbols and updates the graph incrementally in **~300ms**.
+No manual re-syncing needed. `code-search-graph` includes a native OS kernel file watcher (`ReadDirectoryChangesW` on Windows, `inotify` on Linux, `FSEvents` on macOS). When you save a file, it re-parses AST symbols and updates the graph incrementally in **~300ms**.
 
 ---
 
 ## Key Features
 
 ### Surgical Exploration (`explore_codebase`)
-Inspired by CodeGraph. Instead of forcing the agent to run multiple rounds of grep and file reads, `explore_codebase` aggregates the entry route, core implementation, upstream callers, downstream callees, and verbatim source code in **1 single tool call**.
+Instead of forcing the agent to run multiple rounds of grep and file reads, `explore_codebase` aggregates the entry route, core implementation, upstream callers, downstream callees, and verbatim source code in **1 single tool call**.
 
 ### Deterministic Call Graph & Blast Radius
 - `get_symbol_callers`: Query who calls function X across files (< 15ms).
@@ -220,35 +220,35 @@ Powered by **Typer**. Every command supports both `--path` / `-p` flags and posi
 
 ```bash
 # 1. Index codebase
-code-search-mcp index /path/to/project
-code-search-mcp index /path/to/project --skip-vector   # Fast structure-only mode
-code-search-mcp index /path/to/project --force-vector  # Force dense vectors
+code-search-graph index /path/to/project
+code-search-graph index /path/to/project --skip-vector   # Fast structure-only mode
+code-search-graph index /path/to/project --force-vector  # Force dense vectors
 
-# 2. Surgical exploration (CodeGraph style)
-code-search-mcp explore "user login and token verification" -p /path/to/project
+# 2. Surgical exploration
+code-search-graph explore "user login and token verification" -p /path/to/project
 
 # 3. Call graph callers & callees
-code-search-mcp callers "verify_password" -p /path/to/project
-code-search-mcp callees "AuthService.login" -p /path/to/project
+code-search-graph callers "verify_password" -p /path/to/project
+code-search-graph callees "AuthService.login" -p /path/to/project
 
 # 4. Blast radius analysis
-code-search-mcp impact "User" --depth 3 -p /path/to/project
+code-search-graph impact "User" --depth 3 -p /path/to/project
 
 # 5. Architecture outline
-code-search-mcp outline -p /path/to/project
+code-search-graph outline -p /path/to/project
 
 # 6. ripgrep exact search
-code-search-mcp exact "SECRET_KEY" -p /path/to/project
+code-search-graph exact "SECRET_KEY" -p /path/to/project
 
 # 7. 4-way hybrid search
-code-search-mcp search "refund order payment" -p /path/to/project
+code-search-graph search "refund order payment" -p /path/to/project
 
 # 8. Start foreground file watcher
-code-search-mcp watch -p /path/to/project --debounce 1500
+code-search-graph watch -p /path/to/project --debounce 1500
 
 # 9. Cache management
-code-search-mcp cache
-code-search-mcp clean --orphaned
+code-search-graph cache
+code-search-graph clean --orphaned
 ```
 
 ---
@@ -268,17 +268,17 @@ code-search-mcp clean --orphaned
 ## Data & Privacy
 
 - **100% Local Execution**: Model (`bge-small-zh-v1.5`) runs locally via ONNX Runtime. Zero code, file paths, or symbol queries are sent to external services.
-- **Zero Repo Contamination**: All SQLite graphs and LanceDB files are stored in `~/.code-search-mcp/`. Nothing is written to your project tree, leaving Git status completely clean.
+- **Zero Repo Contamination**: All SQLite graphs and LanceDB files are stored in `~/.code-search-graph/`. Nothing is written to your project tree, leaving Git status completely clean.
 
 ---
 
 ## 🇨🇳 中文说明
 
-### 为什么选择 code-search-mcp？
+### 为什么选择 code-search-graph？
 
 当 AI 编程助手（Claude Code、Cursor 等）需要理解代码库时，传统方式极为低效：`grep`、`glob` 和 `read_file` 逐个文件翻找，在写出第一行代码前就已经烧掉了数十轮工具调用和上万 Token。
 
-**code-search-mcp 让 Agent 在 1 次工具调用内精准获取所需代码。** 它预先构建了包含符号、调用边和路由的完整知识图谱：
+**code-search-graph 让 Agent 在 1 次工具调用内精准获取所需代码。** 它预先构建了包含符号、调用边和路由的完整知识图谱：
 - 聚合入口路由与核心实现
 - 追踪上下游依赖与改动爆炸半径
 - **精准上下文（Surgical Context），告别逐文件检索**，让大中小仓库上的每次回答都更快、更省 Token。
@@ -286,9 +286,9 @@ code-search-mcp clean --orphaned
 ```text
 探索 Token 消耗对比 (单个复杂任务，越低越好):
 传统 Agent (grep+read 循环) [████████████████████████████████████████] 38,500 (100%)
-常规单向量 RAG (无代码图谱) [███████████████████                     ] 18,200 (47.2%)
-CodeGraph (纯符号图无向量)  [█████                                   ] 4,800  (12.5%)
-code-search-mcp             [█                                       ] 1,150  (3.0%, 节省 97%)
+传统单向量 RAG (无代码图谱) [███████████████████                     ] 18,200 (47.2%)
+纯符号图谱 (无向量)          [█████                                   ] 4,800  (12.5%)
+code-search-graph             [█                                       ] 1,150  (3.0%, 节省 97%)
 ```
 
 ### 快速上手 (4 步搞定)
@@ -300,17 +300,17 @@ pip install code-search-graph
 # 2. 自动配置 AI 客户端 (自动检测 Claude Code / Cursor / Windsurf 并写入 MCP 配置与规则)
 code-search-graph install
 # 或者使用别名
-code-search-mcp install
+code-search-graph install
 
 # 3. 索引项目 (大仓库自动进入免向量轻量模式，毫秒级就绪)
-code-search-mcp index /path/to/project
+code-search-graph index /path/to/project
 
 # 4. 无需手动同步！内置内核级文件监听器，保存代码 0.3 秒内增量更新
 ```
 
 ### 核心特性
 
-1. **一键手术级探索 (`explore_codebase`)**：启发自 CodeGraph。单次调用返回入口路由、实现源码、上下游调用链路与证据切片，杜绝反复读文件。
+1. **一键手术级探索 (`explore_codebase`)**：单次调用返回入口路由、实现源码、上下游调用链路与证据切片，杜绝反复读文件。
 2. **改动爆炸半径 (`get_impact_radius`)**：重构前分析受波及的上游模块、文件与暴露的 HTTP API。
 3. **4 路 RRF 倒数排名融合**：Dense 向量 + FTS 全文 + 内置 ripgrep 确凿字面量 + AST 结构排名，自动对 `verifyJwtTokenSignature` 等长标识符做驼峰/下划线拆词，Top-3 召回率达 **94.6%**。
 4. **架构大纲地图 (`get_codebase_outline`)**：消耗数百 Token 快速理清多语言项目全貌与模块职责。
@@ -330,3 +330,4 @@ code-search-mcp index /path/to/project
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
+

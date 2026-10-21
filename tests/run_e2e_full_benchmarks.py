@@ -470,8 +470,8 @@ def run_vscode_benchmark() -> Dict[str, Any]:
 
 def main():
     print("=" * 70)
-    print("🏁 CODE-SEARCH-MCP 真实工业级全量端到端自动化基准测试套件")
-    print("测试目标: FastAPI (Python Web), Django (Python ORM), VS Code (TypeScript Editor)")
+    print("🏁 CODE-SEARCH-GRAPH Real-world Industrial End-to-End Benchmark Suite")
+    print("Targets: FastAPI (Python Web), Django (Python ORM), VS Code (TypeScript Editor)")
     print("=" * 70)
 
     t0_all = time.perf_counter()

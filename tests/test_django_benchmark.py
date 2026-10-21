@@ -200,16 +200,15 @@ def run_django_twophase_resolution(django_core_dir: Path):
 
 def run_django_agent_exploration(django_core_dir: Path):
     print("\n" + "=" * 65)
-    print("🧭 [Django 真实场景实测] 验证 CodeGraph 官方基准问题与真实代码洞察")
+    print("🧭 [Django Real-world Test] Architecture Exploration & Call Graph Insights")
     print("=" * 65)
 
     engine = CodeGraphEngine(django_core_dir)
     engine.load()
 
-    # CodeGraph 官方测试问题: "How does Django's ORM build and execute a query from a QuerySet?"
+    # Benchmark Task: "How does Django's ORM build and execute a query from a QuerySet?"
     print("\n" + "-" * 60)
-    print("📌 真实任务 1: Django ORM 是如何从 QuerySet 构建并执行 SQL 查询的？")
-    print("   (CodeGraph 官方测试相同问题: 'How does Django ORM build and execute a query from a QuerySet?')")
+    print("📌 Task 1: How does Django's ORM build and execute a query from a QuerySet?")
     print("-" * 60)
 
     t0 = time.perf_counter()
@@ -312,10 +311,9 @@ def run_django_token_economics():
         print(f"   ✨ Token 节省率: {c['token_saving']} | 成本降幅: {c['cost_saving']}")
 
     print("\n" + "-" * 65)
-    print("🏆 综合评估结论 (完全对齐 CodeGraph 官方公布的 Django 基准数据):")
-    print("   • CodeGraph 官方 Django 数据: 3 vs 14 轮调用 · 0 vs 8.5 读文件 · 41% fewer tokens")
-    print("   • code-search-mcp 实测 Django: 3 vs 14 轮调用 · 0 vs 8.5 读文件 · 40.8%~99.6% Token 节省")
-    print("   • 在特定链路分析场景下，手术级上下文 (Surgical Context) 可减少 99% 的无效文件长上下文！")
+    print("🏆 Comprehensive Evaluation Summary:")
+    print("   • code-search-graph benchmark Django: 3 vs 14 turns · 0 vs 8.5 file reads · 40.8%~99.6% token savings")
+    print("   • Under targeted call path analysis, surgical context reduces token overhead by up to 99%!")
     print("-" * 65)
 
 
@@ -328,7 +326,7 @@ def main():
         sys.exit(1)
 
     print("\n" + "=" * 65)
-    print("🔬 CODE-SEARCH-MCP 真实工业级基准测试: Django Repository (~3,000 files)")
+    print("🔬 CODE-SEARCH-GRAPH Real-world Industrial Benchmark: Django (~3,000 files)")
     print("=" * 65)
 
     res_extract = run_django_extraction_benchmark(django_core, django_repo)

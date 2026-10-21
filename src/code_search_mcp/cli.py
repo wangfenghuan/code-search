@@ -21,7 +21,9 @@ from code_search_mcp.ui import (
     print_index_result,
     print_markdown,
     print_search_results,
+    print_version,
     print_watch_banner,
+    run_indexing_with_progress,
 )
 
 # Ensure UTF-8 output on Windows consoles
@@ -34,22 +36,22 @@ if sys.platform == "win32":
 
 
 app = typer.Typer(
-    name="code-search-mcp",
+    name="code-search-graph",
     help="""
-⚡ code-search-mcp: Local lightweight code semantic search & structural graph engine (AST + Vector + BM25 + Ripgrep)
+⚡ code-search-graph: Local AST Call Graph & Intelligent Hybrid Semantic Code Search Engine
 
 Common Examples:
-  code-search-mcp index .                           # Scan & index repository with vector embeddings & AST
-  code-search-mcp search "user auth and token"      # Hybrid semantic code search (with syntax highlighting)
-  code-search-mcp exact "hash_password"             # Ultra-fast exact literal / regex search via ripgrep
-  code-search-mcp outline                           # Multi-language high-level architecture map (token saver)
-  code-search-mcp explore "user login & auth flow"  # End-to-end surgical feature exploration (CodeGraph-style)
-  code-search-mcp callers "verify_token"            # Find who calls a specific function or class
-  code-search-mcp callees "AuthService.login"       # Find downstream dependencies called by a function
-  code-search-mcp impact "User" --depth 3           # Blast-radius impact analysis (cross-file reverse propagation)
-  code-search-mcp cache                             # View global index cache entries & disk usage
-  code-search-mcp clean --orphaned                  # Safely clean orphaned caches to free disk space
-  code-search-mcp install                           # One-click auto-config for Claude / Cursor / Windsurf MCP
+  code-search-graph index .                           # Scan & index repository with vector embeddings & AST
+  code-search-graph search "user auth and token"      # Hybrid semantic code search (with syntax highlighting)
+  code-search-graph exact "hash_password"             # Ultra-fast exact literal / regex search via ripgrep
+  code-search-graph outline                           # Multi-language high-level architecture map (token saver)
+  code-search-graph explore "user login & auth flow"  # End-to-end surgical feature exploration
+  code-search-graph callers "verify_token"            # Find who calls a specific function or class
+  code-search-graph callees "AuthService.login"       # Find downstream dependencies called by a function
+  code-search-graph impact "User" --depth 3           # Blast-radius impact analysis (cross-file reverse propagation)
+  code-search-graph cache                             # View global index cache entries & disk usage
+  code-search-graph clean --orphaned                  # Safely clean orphaned caches to free disk space
+  code-search-graph install                           # One-click auto-config for Claude / Cursor / Windsurf MCP
 """,
     add_completion=False,
     no_args_is_help=False,
@@ -57,9 +59,25 @@ Common Examples:
 )
 
 
+def version_callback(value: bool):
+    if value:
+        print_version()
+        raise typer.Exit(code=0)
+
+
 @app.callback(invoke_without_command=True)
-def main_callback(ctx: typer.Context):
-    """code-search-mcp core entry point and dispatcher"""
+def main_callback(
+    ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        "-v",
+        help="Show detailed system and version information",
+        callback=version_callback,
+        is_eager=True,
+    ),
+):
+    """code-search-graph core entry point and dispatcher"""
     if ctx.invoked_subcommand is None:
         # If not running in an interactive terminal (e.g. piped stdio from Claude Desktop / Cursor), launch MCP server
         if not sys.stdin.isatty():
@@ -111,14 +129,12 @@ def index_cmd(
         raise typer.Exit(code=1)
 
     indexer = CodeIndexer(target)
-    t0 = time.perf_counter()
-    with console.status(f"[bold cyan]Parsing codebase and building AST & vector index ({target.name})...[/bold cyan]", spinner="dots"):
-        res = indexer.index_all(
-            skip_vector=skip_vector,
-            force_vector=force_vector,
-            vector_threshold=threshold,
-        )
-    elapsed = time.perf_counter() - t0
+    res, elapsed = run_indexing_with_progress(
+        indexer,
+        skip_vector=skip_vector,
+        force_vector=force_vector,
+        vector_threshold=threshold,
+    )
     print_index_result(res, elapsed_seconds=elapsed)
 
 
@@ -180,9 +196,9 @@ def search_cmd(
 
     searcher = CodeSearcher(target)
     if not searcher.is_indexed():
-        console.print(f"[yellow]Notice: Repository '{target}' is not yet indexed. Creating initial index now...[/yellow]")
+        console.print(f"[dim]Notice: Repository '{target.name}' is not yet indexed. Creating initial index...[/dim]")
         indexer = CodeIndexer(target)
-        indexer.index_all()
+        run_indexing_with_progress(indexer)
 
     with console.status("[bold cyan]Performing hybrid multi-channel search (RRF + Vector + BM25)...[/bold cyan]", spinner="dots"):
         results = searcher.search(query, top_k=top_k)
@@ -245,7 +261,7 @@ def exact_cmd(
     print_exact_results(res)
 
 
-@app.command("explore", help="End-to-end surgical feature exploration (CodeGraph style)")
+@app.command("explore", help="End-to-end surgical feature exploration")
 def explore_cmd(
     query: str = typer.Argument(..., help="Feature question or workflow description"),
     positional_path: Optional[str] = typer.Argument(
@@ -526,18 +542,19 @@ def clean_cmd(
     mgr = CacheManager()
     clean_target = path or positional_path or None
     is_orphaned = orphaned or (not all_caches and not days and not clean_target)
-    res = mgr.clean(
-        all_caches=all_caches,
-        orphaned_only=is_orphaned,
-        older_than_days=days,
-        target_repo=clean_target,
-        dry_run=dry_run,
-    )
+    with console.status("[bold yellow]Scanning and cleaning index cache...[/bold yellow]", spinner="dots"):
+        res = mgr.clean(
+            all_caches=all_caches,
+            orphaned_only=is_orphaned,
+            older_than_days=days,
+            target_repo=clean_target,
+            dry_run=dry_run,
+        )
     print_clean_result(res)
 
 
 def main():
-    app(prog_name="code-search-mcp")
+    app(prog_name="code-search-graph")
 
 
 if __name__ == "__main__":

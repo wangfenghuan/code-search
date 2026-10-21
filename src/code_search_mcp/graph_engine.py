@@ -35,14 +35,7 @@ class SymbolNode:
 
 
 class CodeGraphEngine:
-    """轻量级多语言代码知识图谱引擎 (启发自 CodeGraph 与 Zed)
-
-    核心能力:
-    1. 上游追踪 (get_callers): 谁调用了这个符号 (按需 ripgrep + tree-sitter 秒级抽取)
-    2. 下游追踪 (get_callees): 这个符号调用了哪些下级函数与服务 (按需微秒级函数体解析)
-    3. 爆炸半径 (get_impact_radius): 改动该符号会影响哪些上层模块、测试与外部 API 路由
-    4. 一键探索 (explore_feature): 语义检索 + 拓扑图双向展开，1 次调用直出全链路证据
-    """
+    """Lightweight multi-language code knowledge graph engine"""
 
     def __init__(self, repo_path: str | Path):
         self.repo_path = Path(repo_path).resolve()
@@ -744,9 +737,8 @@ class CodeGraphEngine:
             return None
 
     def _resolve_callers_on_demand(self, symbol_name: str):
-        """按需构建上游调用方拓扑 (启发自 Zed)：
-        利用 ripgrep 秒级扫描仓库中的文本匹配行，再结合 SQLite 节点区间判定所属调用函数，
-        精准落库至 resolved_edges 并缓存结果，彻底消除索引阶段的全量预计算开销。
+        """On-demand upstream caller topology resolution:
+        Scans code with ripgrep and resolves enclosing callers via SQLite node ranges.
         """
         if self._is_query_resolved("callers", symbol_name):
             return
@@ -976,9 +968,8 @@ class CodeGraphEngine:
         conn.commit()
 
     def _resolve_callees_on_demand(self, symbol_name: str):
-        """按需提取单个符号函数体内的下游调用点并消歧解析 (启发自 Zed)：
-        仅在用户查询该符号时，微秒级对其代码体运行 tree-sitter 抽取调用并关联目标定义，
-        杜绝索引阶段解析全库 30,000 条调用边的内存暴涨。
+        """On-demand downstream callee extraction and disambiguation:
+        Parses function body on-the-fly with tree-sitter when queried.
         """
         if self._is_query_resolved("callees", symbol_name):
             return
@@ -1318,7 +1309,7 @@ class CodeGraphEngine:
             }
 
         conn = self._get_db()
-        # 按需秒级扫描与消歧上游调用方 (启发自 Zed)
+        # On-demand scanning and disambiguating upstream callers
         self._resolve_callers_on_demand(symbol_name)
 
         bare_name = symbol_name.split(".")[-1]
@@ -1453,7 +1444,7 @@ class CodeGraphEngine:
             }
 
         conn = self._get_db()
-        # 按需提取函数体内部调用并建立拓扑边 (启发自 Zed)
+        # On-demand extracting function-body callees and establishing edges
         self._resolve_callees_on_demand(symbol_name)
 
         cursor = conn.execute(
@@ -1820,12 +1811,12 @@ class CodeGraphEngine:
 
 
     def format_tree_ascii(self, node: Dict[str, Any], prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
-        """将调用树格式化为目录树 ASCII 字符串列表 (Fix #11)"""
+        """Format call tree as ASCII directory tree lines"""
         lines = []
         sym = node["symbol"]
-        f_info = f" ({node['file_path']}#L{node['line']})" if node.get("file_path") else " (外部库/内置)"
+        f_info = f" ({node['file_path']}#L{node['line']})" if node.get("file_path") else " (external/built-in)"
         doc = f" — *{node['docstring'].strip()}*" if node.get("docstring") else ""
-        dyn_badge = " [⚡动态]" if node.get("is_dynamic") else ""
+        dyn_badge = " [⚡dynamic]" if node.get("is_dynamic") else ""
 
         if is_root:
             lines.append(f"`{sym}`{dyn_badge}{f_info}{doc}")
@@ -1855,30 +1846,29 @@ class CodeGraphEngine:
         return lines
 
     def explore_feature(self, query: str, top_k: int = 3, max_depth: int = 3) -> Dict[str, Any]:
-        """一键全链路手术级探索 (explore_feature):
-        语义召回入口 + BFS 多层调用链路展开 + 路由全景与代码证据聚合，
-        让 AI Agent 仅需 1 次工具调用即可获得业务完整执行拓扑与证据。
+        """End-to-end surgical exploration (explore_feature):
+        Semantic recall + BFS multi-tier execution trace + routes and source code evidence.
         """
         if not self.load():
             return {
                 "status": "error",
-                "message": f"未找到代码库索引，请先执行 index_codebase",
+                "message": f"Codebase index not found, please run index_codebase first",
             }
 
         searcher = CodeSearcher(self.repo_path)
-        # 扩大初始召回候选，保证跨多模块复杂链路被完全覆盖 (Fix #8)
+        # Expand initial candidate pool to cover multi-module flows
         matches = searcher.search(query=query, top_k=max(top_k * 2, 6))
 
         if not matches:
             return {
                 "status": "no_match",
                 "query": query,
-                "message": f"未找到与 '{query}' 相关的核心代码模块",
+                "message": f"No core code modules found matching '{query}'",
             }
 
         markdown_sections = []
-        markdown_sections.append(f"# 🧭 业务全链路手术级探索: {query}\n")
-        markdown_sections.append(f"> 💡 **一次调用直达完整上下文**: 聚合了语义命中入口、HTTP 外部路由、下游多层 BFS 调用依赖树与核心源码。\n")
+        markdown_sections.append(f"# 🧭 Surgical Feature Exploration: {query}\n")
+        markdown_sections.append(f"> 💡 **Single-Call Complete Context**: Aggregates semantic entry points, HTTP routes, multi-tier BFS dependency trees, and source code evidence.\n")
 
         # 收集所有已展开的子节点用于跨 entry 去重 (Fix #10)
         global_expanded_symbols: Set[str] = set()
@@ -1903,26 +1893,26 @@ class CodeGraphEngine:
             all_involved_files.add(file_path)
             global_expanded_symbols.add(sym_name)
 
-            markdown_sections.append(f"## 🎯 业务调用链路 {flow_idx}: `{sym_name}` ({file_path}#L{start_line}-L{end_line})")
+            markdown_sections.append(f"## 🎯 Execution Flow {flow_idx}: `{sym_name}` ({file_path}#L{start_line}-L{end_line})")
 
-            # 路由感知
+            # Route awareness
             if route_info:
-                markdown_sections.append(f"- 🌐 **关联外部路由**: `{route_info}`")
+                markdown_sections.append(f"- 🌐 **Associated External Route**: `{route_info}`")
             else:
                 impact = self.get_impact_radius(sym_name, max_depth=3)
                 up_routes = impact.get("impacted_external_routes", [])
                 if up_routes:
                     r = up_routes[0]
-                    markdown_sections.append(f"- 🌐 **关联触发路由**: `{r['route']}` (由 `{r['handler']}` 处理，位于 `{r['file_path']}`:L{r['line']})")
+                    markdown_sections.append(f"- 🌐 **Associated Trigger Route**: `{r['route']}` (handled by `{r['handler']}` at `{r['file_path']}`:L{r['line']})")
 
             if docstring:
-                markdown_sections.append(f"- 📝 **功能描述**: {docstring}")
+                markdown_sections.append(f"- 📝 **Description**: {docstring}")
 
-            # BFS 多层下游依赖树构建与 ASCII 拓扑展示 (Fix #9, #11)
+            # BFS multi-tier dependency tree
             call_tree = self.build_call_tree(sym_name, max_depth=max_depth)
             tree_lines = self.format_tree_ascii(call_tree)
             if len(tree_lines) > 1:
-                markdown_sections.append("\n### 🛣️ 端到端多层调用链路 (Execution Trace):")
+                markdown_sections.append("\n### 🛣️ End-to-End Call Chain (Execution Trace):")
                 markdown_sections.append("```text\n" + "\n".join(tree_lines) + "\n```")
 
             def mark_children(n: Dict[str, Any]):
@@ -1934,26 +1924,26 @@ class CodeGraphEngine:
                     mark_children(ch)
             mark_children(call_tree)
 
-            # 上游触发者 (Callers)
+            # Upstream callers
             callers_res = self.get_callers(sym_name)
             callers = callers_res.get("callers", [])
             if callers:
-                markdown_sections.append("\n### ⬆️ 直接上游触发方 (Callers):")
+                markdown_sections.append("\n### ⬆️ Direct Upstream Triggers (Callers):")
                 for c in callers[:3]:
                     c_sym = c['caller_symbol']
                     c_file = c['file_path']
                     c_line = c['start_line']
-                    route_note = f" [触发路由: `{c['route_info']}`]" if c.get('route_info') else ""
-                    markdown_sections.append(f"  - ⬅️ 被 `{c_sym}` 调用 (位于 `{c_file}`:L{c_line}){route_note}")
+                    route_note = f" [route: `{c['route_info']}`]" if c.get('route_info') else ""
+                    markdown_sections.append(f"  - ⬅️ Called by `{c_sym}` at `{c_file}`:L{c_line}{route_note}")
 
-            # 附带源码证据
-            markdown_sections.append(f"\n### 📦 核心源码实现片段:")
+            # Core implementation snippet
+            markdown_sections.append(f"\n### 📦 Core Implementation Source Code:")
             markdown_sections.append(f"```{m.get('language', 'text')}\n{code}\n```\n")
 
             flow_idx += 1
 
         if all_involved_files:
-            markdown_sections.append("### 📁 链路涉及代码文件清单:")
+            markdown_sections.append("### 📁 Involved Source Files:")
             for f in sorted(list(all_involved_files)):
                 markdown_sections.append(f"- `{f}`")
 
@@ -2015,32 +2005,32 @@ class CodeGraphEngine:
 
 
 def format_callers_markdown(res: Dict[str, Any]) -> str:
-    """格式化 callers 为 Markdown 证据报告"""
+    """Format callers as Markdown evidence report"""
     if res.get("status") != "success":
-        return f"❌ {res.get('message', '查询上游调用失败')}"
+        return f"❌ {res.get('message', 'Failed to query upstream callers')}"
 
     target = res.get("target_symbol", "")
     callers = res.get("callers", [])
     count = res.get("callers_count", 0)
     is_defined = res.get("defined_in_repo", True)
 
-    lines = [f"# 📞 符号上游调用方 (Callers): `{target}` (共 {count} 处调用)\n"]
+    lines = [f"# 📞 Upstream Callers: `{target}` ({count} calls found)\n"]
     ambig_defs = res.get("ambiguous_definitions", [])
     if ambig_defs:
-        lines.append(f"> ⚠️ **同名符号多定义提示**: 符号名 `{target}` 在代码库中存在多处独立定义: {', '.join(ambig_defs)}。以下展示针对该名字的所有调用方。\n")
+        lines.append(f"> ⚠️ **Multiple Definitions**: Symbol `{target}` has multiple independent definitions in codebase: {', '.join(ambig_defs)}. Listing all callers.\n")
 
     if not is_defined:
-        lines.append(f"> ⚠️ **提示**: 符号 `{target}` 在本地代码库中未检索到定义（可能属于第三方库、标准库或已被移除重构）。\n")
+        lines.append(f"> ⚠️ **Note**: Symbol `{target}` is not defined in local codebase (may be external library or standard library).\n")
 
     if count == 0:
-        lines.append("未发现任何显式调用该符号的上游模块（可能是顶级入口、外部暴露接口或未被直接引用的方法）。")
+        lines.append("No upstream callers found calling this symbol.")
         return "\n".join(lines)
 
     for idx, c in enumerate(callers, start=1):
         sym = c['caller_symbol']
         f_path = c['file_path']
         s_line = c['start_line']
-        route = f" 🌐 [接口: `{c['route_info']}`]" if c.get('route_info') else ""
+        route = f" 🌐 [route: `{c['route_info']}`]" if c.get('route_info') else ""
         doc = f" — *{c['docstring']}*" if c.get('docstring') else ""
         lines.append(f"### {idx}. `{sym}` ({f_path}#L{s_line}){route}{doc}")
         if c.get("code_preview"):
@@ -2049,17 +2039,17 @@ def format_callers_markdown(res: Dict[str, Any]) -> str:
 
 
 def format_callees_markdown(res: Dict[str, Any]) -> str:
-    """格式化 callees 为 Markdown 依赖清单"""
+    """Format callees as Markdown dependency list"""
     if res.get("status") != "success":
-        return f"❌ {res.get('message', '查询下游依赖失败')}"
+        return f"❌ {res.get('message', 'Failed to query downstream dependencies')}"
 
     target = res.get("target_symbol", "")
     callees = res.get("callees", [])
     count = res.get("callees_count", 0)
 
-    lines = [f"# 🎯 符号下游依赖调用 (Callees): `{target}` (共 {count} 个调用目标)\n"]
+    lines = [f"# 🎯 Downstream Callees: `{target}` ({count} targets called)\n"]
     if count == 0:
-        lines.append("该符号内部未检测到任何函数/方法调用（叶子节点函数）。")
+        lines.append("No function or method calls detected within this symbol (leaf function).")
         return "\n".join(lines)
 
     for idx, c in enumerate(callees, start=1):
@@ -2073,18 +2063,18 @@ def format_callees_markdown(res: Dict[str, Any]) -> str:
             doc = f" — *{c.get('docstring')}*" if c.get('docstring') else ""
             ambig_note = ""
             if c.get("ambiguous") and c.get("candidates"):
-                ambig_note = f"\n    ⚠️ *[重名歧义提示: 存在多处同名候选，当前推断为 `{f_path}:L{s_line}`; 备选: {', '.join(c['candidates'])}]*"
-            lines.append(f"- **{idx}. `{sym}`**{qname_tag} ➡️ (定义于 `{f_path}`:L{s_line}){doc}{ambig_note}")
+                ambig_note = f"\n    ⚠️ *[Ambiguity: multiple candidates found, resolved to `{f_path}:L{s_line}`; alternatives: {', '.join(c['candidates'])}]*"
+            lines.append(f"- **{idx}. `{sym}`**{qname_tag} ➡️ (defined at `{f_path}`:L{s_line}){doc}{ambig_note}")
         else:
-            lines.append(f"- **{idx}. `{sym}`** (外部库依赖或内置函数)")
+            lines.append(f"- **{idx}. `{sym}`** (external library or built-in)")
 
     return "\n".join(lines)
 
 
 def format_impact_markdown(res: Dict[str, Any]) -> str:
-    """格式化爆炸半径/影响面分析结果为 Markdown"""
+    """Format blast radius impact analysis report as Markdown"""
     if res.get("status") != "success":
-        return f"❌ {res.get('message', '影响面分析失败')}"
+        return f"❌ {res.get('message', 'Failed to analyze impact radius')}"
 
     target = res.get("target_symbol", "")
     total_syms = res.get("total_impacted_symbols", 0)
@@ -2092,63 +2082,63 @@ def format_impact_markdown(res: Dict[str, Any]) -> str:
     routes = res.get("impacted_external_routes", [])
     chain = res.get("impact_propagation_chain", [])
 
-    lines = [f"# 💥 符号修改爆炸半径/影响面分析: `{target}`\n"]
-    lines.append(f"> ⚠️ **改动风险评估**: 修改 `{target}` 将可能波及 **{total_syms} 个上游符号**、**{len(files)} 个源文件**，涉及 **{len(routes)} 个外部 API 路由**。\n")
+    lines = [f"# 💥 Change Impact Blast-Radius Analysis: `{target}`\n"]
+    lines.append(f"> ⚠️ **Risk Assessment**: Modifying `{target}` could impact **{total_syms} upstream symbols**, **{len(files)} source files**, and **{len(routes)} external API routes**.\n")
 
     if routes:
-        lines.append("## 🌐 受直接/间接影响的外部暴露接口 (需重点回归测试):")
+        lines.append("## 🌐 Directly/Indirectly Affected External API Routes (Priority for regression testing):")
         for r in routes:
-            lines.append(f"- `{r['route']}` (由 `{r['handler']}` 处理，位于 `{r['file_path']}`:L{r['line']})")
+            lines.append(f"- `{r['route']}` (handled by `{r['handler']}` at `{r['file_path']}`:L{r['line']})")
         lines.append("")
 
     if files:
-        lines.append("## 📁 受影响的代码文件:")
+        lines.append("## 📁 Affected Source Files:")
         for f in files:
             lines.append(f"- `{f}`")
         lines.append("")
 
     if chain:
-        lines.append("## 🌲 调用依赖扩散路径 (Propagation Tree):")
+        lines.append("## 🌲 Dependency Propagation Tree:")
         for item in chain:
             depth = item['depth']
             sym = item['symbol']
             f_path = item['file_path']
             line = item['line']
-            route_tag = f" 🌐 [接口: `{item['route']}`]" if item.get('route') else ""
+            route_tag = f" 🌐 [route: `{item['route']}`]" if item.get('route') else ""
             indent = "  " * (depth - 1)
-            lines.append(f"{indent}- [深度 {depth}] `{sym}` ({f_path}:L{line}){route_tag}")
+            lines.append(f"{indent}- [depth {depth}] `{sym}` ({f_path}:L{line}){route_tag}")
 
     return "\n".join(lines)
 
 
 def format_references_markdown(res: Dict[str, Any]) -> str:
-    """格式化反向引用分析报告为 Markdown (Fix #20)"""
+    """Format cross-module reference analysis report as Markdown"""
     if res.get("status") != "success":
-        return f"❌ {res.get('message', '反向引用检索失败')}"
+        return f"❌ {res.get('message', 'Failed to find references')}"
 
     target = res.get("target", "")
     ast_callers = res.get("structural_callers", [])
     text_refs = res.get("textual_references", [])
     total = res.get("total_references", 0)
 
-    lines = [f"# 🔍 跨模块反向引用分析: `{target}` (共检索到 {total} 处引用)\n"]
+    lines = [f"# 🔍 Cross-Module Reference Analysis: `{target}` ({total} references found)\n"]
     if total == 0:
-        lines.append("未在代码库中发现任何对该符号或文本的显式引用。")
+        lines.append("No explicit references to this symbol or keyword found in the codebase.")
         return "\n".join(lines)
 
     if ast_callers:
-        lines.append(f"## 📞 1. 代码符号显式调用方 ({len(ast_callers)} 处 AST 调用):")
+        lines.append(f"## 📞 1. Explicit AST Code Callers ({len(ast_callers)} calls):")
         for idx, c in enumerate(ast_callers, start=1):
             sym = c["caller_symbol"]
             f_path = c["file_path"]
             s_line = c["start_line"]
-            route = f" 🌐 [触发路由: `{c['route_info']}`]" if c.get("route_info") else ""
+            route = f" 🌐 [route: `{c['route_info']}`]" if c.get("route_info") else ""
             doc = f" — *{c['docstring']}*" if c.get("docstring") else ""
             lines.append(f"- **{idx}. `{sym}`** (`{f_path}`:L{s_line}){route}{doc}")
         lines.append("")
 
     if text_refs:
-        lines.append(f"## 📝 2. 配置/字符串/常量字面量引用 ({len(text_refs)} 处文本引用):")
+        lines.append(f"## 📝 2. Config / String / Literal References ({len(text_refs)} text matches):")
         for idx, m in enumerate(text_refs, start=1):
             f_path = m.get("file_path", "")
             line = m.get("line_number", 0)

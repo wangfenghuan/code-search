@@ -388,13 +388,13 @@ class CodeSearcher:
 
 
 def format_search_results(results: List[Dict[str, Any]], query: str = "", compact: bool = True, full: bool = False) -> str:
-    """格式化检索结果供 MCP 或 CLI 输出，支持 compact 极省 Token 模式"""
+    """Format search results for MCP or CLI output with compact token-efficient mode"""
     if not results:
-        q_tip = f"与 '{query}' " if query else ""
-        return f"未能找到{q_tip}相关的代码片段。可能该代码库尚未索引，或无相关实现。"
+        q_tip = f" matching '{query}'" if query else ""
+        return f"No code snippets found{q_tip}. The codebase may not be indexed or contains no matching implementation."
 
     q_title = f": \"{query}\"" if query else ""
-    output_lines = [f"## 代码检索结果{q_title} (找到 {len(results)} 个最相关代码块，多路 RRF 倒数排名融合)\n"]
+    output_lines = [f"## Code Search Results{q_title} ({len(results)} matches, Hybrid Multi-Channel RRF)\n"]
     for i, item in enumerate(results, start=1):
         rel_path = item["file_path"]
         symbol = item["symbol_name"]
@@ -407,15 +407,15 @@ def format_search_results(results: List[Dict[str, Any]], query: str = "", compac
         doc = item.get("docstring", "").strip()
         code = item["code"].strip()
 
-        header_tags = [f"语言: {lang}", f"得分: {sim}", f"类型: {chunk_type}"]
+        header_tags = [f"Language: {lang}", f"Score: {sim:.3f}", f"Type: {chunk_type}"]
         if route:
-            header_tags.append(f"接口: `{route}`")
+            header_tags.append(f"Route: `{route}`")
 
         output_lines.append(f"### [{i}] `{rel_path}:{start_l}-{end_l}` — `{symbol}`")
-        output_lines.append(f"- **元数据**: {' | '.join(header_tags)}")
+        output_lines.append(f"- **Metadata**: {' | '.join(header_tags)}")
         if doc:
             first_doc = doc.split("\n")[0]
-            output_lines.append(f"- **文档说明**: *{first_doc}*")
+            output_lines.append(f"- **Docstring**: *{first_doc}*")
 
         code_lines = code.splitlines()
         total_lines = len(code_lines)
@@ -423,7 +423,7 @@ def format_search_results(results: List[Dict[str, Any]], query: str = "", compac
         if not full and compact and total_lines > 12:
             preview_code = "\n".join(code_lines[:10])
             output_lines.append(
-                f"```{lang}\n{preview_code}\n# ... (剩余 {total_lines - 10} 行代码，调用 get_file_content 传入起始行 {start_l} 查看完整实现)\n```\n"
+                f"```{lang}\n{preview_code}\n# ... ({total_lines - 10} lines collapsed, use get_file_content with start_line={start_l} to view full code)\n```\n"
             )
         else:
             output_lines.append(f"```{lang}\n{code}\n```\n")

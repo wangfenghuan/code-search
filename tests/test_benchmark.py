@@ -201,7 +201,7 @@ def test_file_complexity_guard():
 
 def main():
     print("\n============================================================")
-    print("🔬 CODE-SEARCH-MCP 工业级高负载基准测试套件 (CodeGraph 对齐)")
+    print("🔬 CODE-SEARCH-GRAPH High-Load Benchmark Suite")
     print("============================================================")
     t_start = time.perf_counter()
 

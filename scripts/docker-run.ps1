@@ -1,6 +1,6 @@
 # ==============================================================================
-# code-search-mcp Docker 启动脚本 (Windows PowerShell)
-# 用法:
+# code-search-graph Docker Launcher (Windows PowerShell)
+# Usage:
 #   .\scripts\docker-run.ps1 [-TargetDir D:\my-project]
 # ==============================================================================
 
@@ -9,20 +9,20 @@ param(
 )
 
 $ResolvedPath = (Resolve-Path $TargetDir).Path
-Write-Host "[code-search-mcp] 正在启动 Docker MCP 容器服务..." -ForegroundColor Green
-Write-Host "[code-search-mcp] 挂载目标代码库: $ResolvedPath" -ForegroundColor Cyan
+Write-Host "[code-search-graph] Starting Docker MCP service..." -ForegroundColor Green
+Write-Host "[code-search-graph] Mounting repository: $ResolvedPath" -ForegroundColor Cyan
 
-# 检查本地是否已有镜像
-$imageExists = docker images -q code-search-mcp:latest
+# Check if Docker image exists locally
+$imageExists = docker images -q code-search-graph:latest
 if (-not $imageExists) {
-    Write-Host "[code-search-mcp] 本地未发现镜像，正在执行首次构建..." -ForegroundColor Yellow
+    Write-Host "[code-search-graph] Image not found locally, building code-search-graph:latest..." -ForegroundColor Yellow
     $RootDir = (Resolve-Path "$PSScriptRoot\..").Path
-    docker build -t code-search-mcp:latest $RootDir
+    docker build -t code-search-graph:latest $RootDir
 }
 
-# 启动 Docker 并将当前控制台 stdio 接通
+# Run container with interactive stdio attached for MCP protocol
 docker run -i --rm `
   -v "${ResolvedPath}:/workspace:ro" `
-  -v "code-search-cache:/root/.code-search-mcp" `
-  code-search-mcp:latest `
+  -v "code-search-cache:/root/.code-search-graph" `
+  code-search-graph:latest `
   serve

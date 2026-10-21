@@ -175,7 +175,7 @@ def run_vscode_twophase_resolution_benchmark(editor_dir: Path):
 
 def analyze_token_savings():
     print("\n" + "=" * 65)
-    print("💰 [Token 经济学与 AI 效率分析] 传统代码漫游 vs code-search-mcp 图谱")
+    print("💰 [Token Economics & AI Efficiency] Traditional Wandering vs code-search-graph")
     print("=" * 65)
 
     # 模拟真实典型任务：理解 VS Code 编辑器文本变动通知全链路 (TextModel text change event)

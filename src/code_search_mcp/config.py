@@ -2,7 +2,7 @@ import hashlib
 import os
 from pathlib import Path
 
-# 默认全局配置与路径管理
+# Default global configurations and path management
 DEFAULT_MODEL_NAME = os.getenv("CODE_SEARCH_MODEL", "BAAI/bge-small-zh-v1.5")
 MODEL_DIMENSIONS = {
     "BAAI/bge-small-zh-v1.5": 512,
@@ -18,11 +18,12 @@ MODEL_DIMENSIONS = {
 
 
 def get_vector_dimension(model_name: str = DEFAULT_MODEL_NAME) -> int:
-    """获取或动态解析指定模型的向量维度"""
+    """Get or dynamically resolve vector dimension for embedding model"""
     if model_name in MODEL_DIMENSIONS:
         return MODEL_DIMENSIONS[model_name]
     try:
         from fastembed import TextEmbedding
+
         for m in TextEmbedding.list_supported_models():
             if m.get("model") == model_name:
                 dim = int(m.get("dim", 512))
@@ -37,7 +38,7 @@ VECTOR_DIMENSION = get_vector_dimension(DEFAULT_MODEL_NAME)
 DEFAULT_TOP_K = 5
 INDEX_SCHEMA_VERSION = "v2"
 
-# 忽略的目录和文件模式
+# Ignored directory patterns
 DEFAULT_IGNORE_DIRS = {
     ".git",
     ".svn",
@@ -70,27 +71,32 @@ DEFAULT_IGNORE_FILES = {
 
 
 def get_cache_root() -> Path:
-    """获取用户全局缓存根目录 ~/.code-search-mcp"""
-    cache_dir = Path.home() / ".code-search-mcp"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+    """Get user global cache directory ~/.code-search-graph (with fallback to ~/.code-search-mcp)"""
+    new_dir = Path.home() / ".code-search-graph"
+    old_dir = Path.home() / ".code-search-mcp"
+    if new_dir.exists():
+        return new_dir
+    if old_dir.exists():
+        return old_dir
+    new_dir.mkdir(parents=True, exist_ok=True)
+    return new_dir
 
 
 def get_db_dir() -> Path:
-    """获取 LanceDB 存储总目录 ~/.code-search-mcp/dbs"""
+    """Get LanceDB database storage directory <cache_root>/dbs"""
     db_dir = get_cache_root() / "dbs"
     db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir
 
 
 def get_repo_hash(repo_path: str | Path) -> str:
-    """根据代码库绝对路径生成唯一哈希标识，用于隔离存储"""
+    """Generate unique deterministic hash for target repository"""
     abs_path = str(Path(repo_path).resolve()).lower()
     return hashlib.sha256(abs_path.encode("utf-8")).hexdigest()[:16]
 
 
 def get_repo_db_path(repo_path: str | Path) -> Path:
-    """获取指定代码库对应的 LanceDB 文件夹路径"""
+    """Get repository LanceDB directory path"""
     repo_hash = get_repo_hash(repo_path)
     path = get_db_dir() / repo_hash
     path.mkdir(parents=True, exist_ok=True)

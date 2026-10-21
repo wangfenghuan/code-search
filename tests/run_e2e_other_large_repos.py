@@ -182,8 +182,8 @@ def run_repo_benchmark(repo_path: Path, repo_name: str, language: str, file_patt
 
 def main():
     print("=" * 70)
-    print("🏁 CODE-SEARCH-MCP 新一批大型工业级代码库全量端到端压测套件")
-    print("涵盖生态: Gin (Go), Express (JavaScript), Flask (Python), Django Full Repo (2,933 Python files)")
+    print("🏁 CODE-SEARCH-GRAPH Large-scale Industrial End-to-End Benchmark Suite")
+    print("Ecosystems: Gin (Go), Express (JavaScript), Flask (Python), Django Full Repo (2,933 Python files)")
     print("=" * 70)
 
     t0_suite = time.perf_counter()

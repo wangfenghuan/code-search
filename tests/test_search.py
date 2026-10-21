@@ -198,7 +198,7 @@ def test_mcp_tools():
     file_content = get_file_content(go_file_path, start_line=1, end_line=15)
     assert "OrderManager" in file_content
 
-    # 工具 5: 新增 CodeGraph 图谱工具
+    # 工具 5: 新增 Call Graph 图谱工具
     # 5.1 explore_codebase
     from code_search_mcp.server import (
         explore_codebase,
@@ -223,11 +223,11 @@ def test_mcp_tools():
     assert "HTTP POST /api/v1/auth/login" in impact_res
     assert "login_api" in impact_res
 
-    print("✅ 全部 FastMCP 工具（包含 4 个 CodeGraph 图谱能力）端到端验证通过！")
+    print("✅ 全部 FastMCP 工具（包含 4 个 Call Graph 图谱能力）端到端验证通过！")
 
 
 def test_codegraph_graph_engine():
-    print("\n--- 6. 测试 CodeGraph 代码知识图谱引擎核心能力 ---")
+    print("\n--- 6. 测试 AST 代码知识图谱引擎核心能力 ---")
     sample_dir = ROOT_DIR / "tests" / "sample_project"
     from code_search_mcp.graph_engine import CodeGraphEngine
 

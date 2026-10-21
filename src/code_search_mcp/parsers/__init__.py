@@ -1,12 +1,14 @@
-"""多语言 AST 解析器子系统 (Multilingual AST Parsers Subsystem)
+"""Multilingual AST Parsers Subsystem
 
-该子系统为 code-search-mcp 提供模块化、高性能且隔离良好的代码解析能力：
-- common: 通用数据结构 (ParsedSymbol, FileImports)、语言内置方法过滤表与 AST 基础工具
-- python: Python 语言专属解析器、闭包与 getattr 动态调用提取
-- javascript: TypeScript / JavaScript 语言专属解析器与调用边提取
-- go: Go 语言专属解析器、结构体与多返回值方法提取
-- java: Java 语言专属解析器、Spring Boot 路由合并与依赖注入推断
-- dispatcher: TreeSitterParser 统一分发门面与单例引擎
+Provides modular, high-performance AST parsing for code-search-graph:
+- common: Base data structures (ParsedSymbol, FileImports), builtin filtering, and AST utilities
+- python: Python AST parser, closure and dynamic attribute call extraction
+- javascript: TypeScript / JavaScript parser and call graph edge extraction
+- vue: Vue Single File Component (.vue SFC) template & script parser
+- go: Go struct and method parser
+- java: Java Spring Boot route mapping and class parser
+- rust: Rust trait, struct, and impl block parser
+- dispatcher: TreeSitterParser unified routing facade and singleton engine
 """
 
 from .common import (

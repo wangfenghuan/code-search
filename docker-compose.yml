@@ -1,19 +1,19 @@
 version: "3.8"
 
 services:
-  code-search-mcp:
+  code-search-graph:
     build:
       context: .
       dockerfile: Dockerfile
-    image: code-search-mcp:latest
-    container_name: code-search-mcp
-    stdin_open: true # 关键配置：保持标准输入打开，对接 MCP JSON-RPC stdio 协议
+    image: code-search-graph:latest
+    container_name: code-search-graph
+    stdin_open: true # Keep stdin open for MCP JSON-RPC stdio protocol
     tty: false
     volumes:
-      # 将目标项目源码目录挂载到容器 /workspace（默认只读）
+      # Mount target codebase into container (read-only)
       - ./:/workspace:ro
-      # 将向量数据库持久化到 Docker 命名卷
-      - code-search-cache:/root/.code-search-mcp
+      # Persist vector and graph cache
+      - code-search-cache:/root/.code-search-graph
     environment:
       - PYTHONUNBUFFERED=1
     command: ["serve"]

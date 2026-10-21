@@ -324,8 +324,8 @@ def main():
             "3. search_codebase (Dense Vector + BM25 RRF Hybrid Ranking)",
             "4. exact_search (ripgrep C-engine regex/literal match)",
             "5. get_file_content (Precise line-ranged code slice)",
-            "6. get_symbol_callers (CodeGraph Upstream Caller Tracer)",
-            "7. get_symbol_callees (CodeGraph Downstream Callee Tracer)",
+            "6. get_symbol_callers (AST Upstream Caller Tracer)",
+            "7. get_symbol_callees (AST Downstream Callee Tracer)",
             "8. get_impact_radius (3-layer BFS Blast Radius Analyzer)",
             "9. explore_codebase (Surgical Context Feature Explorer)",
             "10. find_references (Hybrid AST Callers + ripgrep Textual References)",
@@ -340,7 +340,7 @@ def main():
     report_path.write_text(json.dumps(out_json, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print("\n" + "=" * 80)
-    print("🎉 恭喜！code-search-mcp 全部 11 项 MCP 核心能力全量端到端测试 100% 通过！")
+    print("🎉 All 11 MCP core capabilities passed 100% end-to-end in code-search-graph!")
     print(f"📊 汇总数据:")
     print(f"   • 全量覆盖代码库: {len(all_reports)} 个")
     print(f"   • 全功能测试总耗时: {t_suite:.2f} 秒")

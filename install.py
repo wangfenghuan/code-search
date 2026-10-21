@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""code-search-mcp 一键极速安装与客户端自动配置脚本
+"""One-click installer and client auto-config script for code-search-graph
 
-运行方式：
+Usage:
     python install.py
     uv run install.py
 """
@@ -9,7 +9,7 @@
 import sys
 from pathlib import Path
 
-# 将 src 目录加入模块搜索路径
+# Add src to module search path
 src_dir = Path(__file__).resolve().parent / "src"
 if src_dir.exists():
     sys.path.insert(0, str(src_dir))

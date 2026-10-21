@@ -52,9 +52,15 @@ def test_cli_all_subcommands():
     # 1. Test help
     code, out, err = run_cli_cmd(["--help"])
     assert code == 0, f"help failed: {err}"
-    assert "code-search-mcp" in out
+    assert "code-search-graph" in out or "code-search-mcp" in out
     assert "Usage:" in out or "Options:" in out or "Commands:" in out
     print("✅ 1. CLI --help basic test passed")
+
+    # 1b. Test --version
+    code, out, err = run_cli_cmd(["--version"])
+    assert code == 0, f"--version failed: {err}"
+    assert "0.8.1" in out or "Version" in out
+    print("✅ 1b. CLI --version test passed")
 
     # 2. Test index
     code, out, err = run_cli_cmd(["index", str(SAMPLE_REPO)])

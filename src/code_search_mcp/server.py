@@ -23,111 +23,111 @@ from code_search_mcp.ripgrep_engine import ExactSearchEngine, format_exact_resul
 from code_search_mcp.searcher import CodeSearcher, format_search_results, resolve_repo_path
 from code_search_mcp.watcher import get_or_create_watcher
 
-# 创建 FastMCP 实例
-mcp = FastMCP("code-search-mcp")
+# Create FastMCP instance with unified name
+mcp = FastMCP("code-search-graph")
 
 
 @mcp.tool()
 def index_codebase(path: str, skip_vector: bool = False, force_vector: bool = False) -> str:
-    """扫描并索引指定路径下的多语言代码库，生成代码知识图谱、架构大纲与向量数据库，并自动激活后台实时热监听器。
+    """Scan and index a multi-language codebase at target path, generating call graph, architectural outline, and vector database with auto-activated live watcher.
 
     Args:
-        path: 代码库的根目录路径（支持相对路径或绝对路径）
-        skip_vector: 是否跳过向量嵌入（默认 False；对 >2000 文件的超大仓库将自动开启以避免高负载与耗时，仅构建 CodeGraph 结构图与大纲）
-        force_vector: 是否强制启用全量流式向量嵌入（默认 False；设为 True 时即使大仓库也执行真流式向量化，内存恒定极小）
+        path: Root directory path of the codebase (relative or absolute)
+        skip_vector: Whether to skip vector embeddings (default: False; automatically enabled for large repos >2000 files to avoid high memory/time, indexing outline and SQLite graph only)
+        force_vector: Force full streaming vector embeddings even for large repositories (default: False)
 
     Returns:
-        索引结果摘要（包含文件数、生成的代码块数与索引模式）
+        Summary of indexing results including file count, chunk count, and indexing mode
     """
     try:
         repo_dir = Path(path).resolve()
         if not repo_dir.exists() or not repo_dir.is_dir():
-            return f"错误: 路径 '{path}' 不存在或不是一个有效目录。"
+            return f"Error: Path '{path}' does not exist or is not a valid directory."
 
         indexer = CodeIndexer(repo_dir)
         res = indexer.index_all(skip_vector=skip_vector, force_vector=force_vector)
 
-        # 自动启动该仓库的后台实时热监听器，后续任意代码保存操作均自动毫秒级增量同步
+        # Automatically start live background watcher
         get_or_create_watcher(repo_dir, auto_start=True)
 
-        mode_str = "轻量结构化模式 (免向量)" if not res.get("vector_indexed", True) else "全量流式向量模式"
+        mode_str = "lightweight structured mode (no vectors)" if not res.get("vector_indexed", True) else "full streaming vector mode"
 
         return (
-            f"成功完成代码库索引！\n"
-            f"- 目标路径: {res['repo_path']}\n"
-            f"- 索引模式: {mode_str}\n"
-            f"- 扫描多语言源文件数: {res['indexed_files']}\n"
-            f"- 提取代码块数: {res['indexed_chunks']}\n"
-            f"- 📡 后台热更新监听器: 已启动 (监控 Python/TS/JS/Go/Java/Rust，改动保存即刻增量生效)\n"
-            f"提示: 可随时调用 `get_codebase_outline()` 查看全局架构大纲，或使用 `get_watch_status()` 查看同步状态。"
+            f"Codebase indexing completed successfully!\n"
+            f"- Target Path: {res['repo_path']}\n"
+            f"- Indexing Mode: {mode_str}\n"
+            f"- Indexed Source Files: {res['indexed_files']}\n"
+            f"- Extracted Code Chunks: {res['indexed_chunks']}\n"
+            f"- 📡 Live File Watcher: Active (monitoring Python/TS/JS/Vue/Go/Java/Rust for instant incremental sync)\n"
+            f"Tip: Call `get_codebase_outline()` to view architectural map, or `get_watch_status()` to inspect watcher."
         )
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] index_codebase 发生错误: {e}\n")
-        return f"索引代码库失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] index_codebase error: {e}\n")
+        return f"Failed to index codebase: {str(e)}"
 
 
 @mcp.tool()
 def get_codebase_outline(path: str = "", max_depth: int = 3) -> str:
-    """获取代码库的全局架构大纲地图（极省 Token）。
-    展示项目所有核心模块、文件职责摘要、包含的类与核心函数列表。
-    【极力推荐】：在大仓库中接手新任务时，优先调用本工具快速理清项目拓扑与模块分布，避免盲目全盘搜索。
+    """Get high-level architectural outline map of the codebase (token-efficient).
+    Displays core modules, file responsibilities, classes, and main functions.
+    Highly Recommended: Always invoke this tool first when starting a new task in an unfamiliar repository to understand project layout without blind grep searches.
 
     Args:
-        path: 代码库根目录路径（可选，未指定时默认使用当前或最近索引项目）
-        max_depth: 遍历目录的最大层级（默认 3 层）
+        path: Root directory path of the repository (optional, defaults to current or most recently indexed repo)
+        max_depth: Maximum directory traversal depth (default: 3)
 
     Returns:
-        精炼紧凑的项目架构大纲 Markdown
+        Compact Markdown architectural outline
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。请在参数中指定 path。"
+            return "Error: Could not resolve target repository path. Please specify 'path' argument."
 
         gen = ProjectOutlineGenerator(target_repo)
         outline_data = gen.get_cached_or_generate()
         return gen.format_as_markdown(outline_data, max_depth=max_depth)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] get_codebase_outline 发生错误: {e}\n")
-        return f"获取项目大纲失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] get_codebase_outline error: {e}\n")
+        return f"Failed to get codebase outline: {str(e)}"
 
 
 @mcp.tool()
 def search_codebase(query: str, path: str = "", top_k: int = 5, compact: bool = True) -> str:
-    """【意图与概念语义检索】使用自然语言描述业务功能，通过 Dense 向量与 BM25 全文检索的 RRF 融合算法查找代码。
+    """Semantic hybrid code search using natural language feature descriptions (Dense Vector + BM25 RRF fusion).
 
-    🎯 适用场景：
-    - 当你想按功能意图、业务概念或自然语言提问（如“用户登录认证流程”、“密码加密加盐”、“订单超时取消”、“支付回调处理”）寻找代码时；
-    - 当你不知道确切的函数名或模块名，需要全局意图召回时。
+    Best for:
+    - Searching by intent or business concepts (e.g. 'user login authentication flow', 'password hashing and salt', 'payment refund webhook');
+    - Discovering code when exact function or module names are unknown.
 
-    ⚠️ 适用边界：如果你已经知道确切的标识符名称、错误码（如 'ERR_AUTH'）、配置项 Key（如 'DATABASE_URL'）或特定字面量，请优先调用 `exact_search`。
+    Boundary Note: If you already know the exact identifier name, config key (e.g. 'DATABASE_URL'), or error code, use `exact_search` instead.
 
     Args:
-        query: 自然语言业务描述，如“用户登录认证逻辑”、“POST /login 接口实现”、“数据库连接池配置”等
-        path: 代码库根目录路径（可选，未指定时默认使用当前项目或最近一次索引的项目）
-        top_k: 返回最相关的结果数量（默认 5 个）
-        compact: 是否启用极简 Token 节省模式（默认 True：返回核心签名、摘要与核心前 10 行预览；False：输出完整实现代码）
+        query: Natural language query describing desired functionality or feature
+        path: Root directory path of the codebase (optional, defaults to current or recent repo)
+        top_k: Number of top relevant results to return (default: 5)
+        compact: Enable token-saving compact mode with core signatures and 10-line preview (default: True)
 
     Returns:
-        包含文件路径、行号范围、符号名称、Web 路由与代码片段的 Markdown 格式结果
+        Markdown report containing file paths, line ranges, symbols, routes, and syntax snippets
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path，或先调用 index_codebase 进行索引。"
+            return "Error: Target repository not found. Please provide 'path' or run index_codebase first."
 
         searcher = CodeSearcher(target_repo)
         if not searcher.is_indexed():
             return (
-                f"代码库 '{target_repo}' 尚未构建索引。\n"
-                f"请先调用 `index_codebase(path='{target_repo}')` 生成索引后再进行检索。"
+                f"Repository '{target_repo}' is not yet indexed.\n"
+                f"Please run `index_codebase(path='{target_repo}')` first."
             )
 
         results = searcher.search(query=query, top_k=top_k)
         return format_search_results(results, query, compact=compact)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] search_codebase 发生错误: {e}\n")
-        return f"代码检索失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] search_codebase error: {e}\n")
+        return f"Code search failed: {str(e)}"
 
 
 @mcp.tool()
@@ -139,30 +139,30 @@ def exact_search(
     file_glob: str = "",
     max_results: int = 20,
 ) -> str:
-    """【字面量与正则精准检索】基于底层工业级 ripgrep，极速查找确切代码文本、标识符、配置项、错误码或正则。
+    """Exact literal and regex search powered by embedded industrial ripgrep.
 
-    🎯 适用场景：
-    - 当你拥有确切的代码字面量时（如确切函数名 'verify_password'、配置项 Key 'SECRET_KEY'、错误码 'ERR_INVALID_TOKEN'）；
-    - 当你想在全仓库中精确查找某个 API URL 路径字符串（如 '/api/v1/auth'）的所有引用位置；
-    - 当你需要进行跨多文件的正则表达式查找时。
+    Best for:
+    - Searching exact identifiers (e.g. 'verify_password', 'SECRET_KEY', 'ERR_INVALID_TOKEN');
+    - Locating API URL route strings (e.g. '/api/v1/auth') across the whole repository;
+    - Multi-file regular expression searches with sub-second response times.
 
-    ⚠️ 适用边界：如果你不知道确切的名字，只是想按模糊业务含义探索代码，请调用 `search_codebase`。
+    Boundary Note: If searching by fuzzy business intent without knowing symbol names, call `search_codebase` instead.
 
     Args:
-        pattern: 目标文本或正则表达式（如 "SECRET_KEY"、"ERR_AUTH_EXPIRED"、"api/v1/auth"）
-        path: 代码库根目录路径（可选，默认当前项目）
-        is_regex: 是否为正则表达式（默认 False：纯文本精确匹配）
-        case_sensitive: 是否区分大小写（默认 False：忽略大小写）
-        file_glob: 文件通配符过滤（如 "*.py"、"*.env"、"*.json"）
-        max_results: 最大返回结果数量（默认 20 条）
+        pattern: Target literal string or regex pattern (e.g. 'SECRET_KEY', 'ERR_AUTH_EXPIRED')
+        path: Root directory path (optional, defaults to current project)
+        is_regex: Whether pattern is a regular expression (default: False)
+        case_sensitive: Whether match is case sensitive (default: False)
+        file_glob: File glob filter pattern (e.g. '*.py', '*.ts')
+        max_results: Maximum number of matches to return (default: 20)
 
     Returns:
-        带文件路径、行号标尺与高亮匹配行的 Markdown 证据报告
+        Markdown evidence report with file paths, line numbers, and matching lines
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+            return "Error: Could not resolve target repository path. Please provide 'path'."
 
         engine = ExactSearchEngine(target_repo)
         res = engine.search(
@@ -174,32 +174,32 @@ def exact_search(
         )
         return format_exact_results(res)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] exact_search 发生错误: {e}\n")
-        return f"精准搜索失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] exact_search error: {e}\n")
+        return f"Exact search failed: {str(e)}"
 
 
 @mcp.tool()
 def get_file_content(path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
-    """读取指定代码文件的内容，可限定行号范围（支持行号标注方便阅读）。
-    配合 search_codebase 的 compact 模式与 exact_search 使用，按需精准展开目标代码，大幅节省上下文 Token。
+    """Read contents of a specific file with optional line range and line numbers.
+    Used in combination with `search_codebase` compact mode to inspect full implementations on demand while saving tokens.
 
     Args:
-        path: 代码文件的相对路径或绝对路径
-        start_line: 起始行号（1-based，可选）
-        end_line: 结束行号（1-based，包含，可选）
+        path: Relative or absolute path to the file
+        start_line: 1-based start line number (optional)
+        end_line: 1-based end line number inclusive (optional)
 
     Returns:
-        包含行号前缀的文件内容
+        File contents with line numbers
     """
     try:
         file_path = Path(path).resolve()
         if not file_path.exists() or not file_path.is_file():
-            return f"错误: 文件 '{path}' 不存在。"
+            return f"Error: File '{path}' does not exist."
 
         try:
             content = file_path.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
-            return f"无法读取文件 '{path}': {e}"
+            return f"Failed to read file '{path}': {e}"
 
         lines = content.splitlines()
         total_lines = len(lines)
@@ -208,11 +208,11 @@ def get_file_content(path: str, start_line: Optional[int] = None, end_line: Opti
         e = total_lines if end_line is None else min(total_lines, end_line)
 
         if s > total_lines:
-            return f"起始行号 {s} 超过文件总行数 {total_lines}。"
+            return f"Start line {s} exceeds total lines ({total_lines})."
         if s > e:
-            return f"起始行号 {s} 大于结束行号 {e}。"
+            return f"Start line {s} is greater than end line {e}."
 
-        output_lines = [f"# 文件: {file_path.name} (第 {s} 至 {e} 行，共 {total_lines} 行)\n```python"]
+        output_lines = [f"# File: {file_path.name} (Lines {s}-{e} of {total_lines})\n```"]
         for i in range(s, e + 1):
             line_str = lines[i - 1]
             output_lines.append(f"{i:4d} | {line_str}")
@@ -220,190 +220,188 @@ def get_file_content(path: str, start_line: Optional[int] = None, end_line: Opti
 
         return "\n".join(output_lines)
     except Exception as e:
-        return f"获取文件内容失败: {str(e)}"
+        return f"Failed to get file content: {str(e)}"
 
 
 @mcp.tool()
 def explore_codebase(query: str, path: str = "", top_k: int = 2) -> str:
-    """【旗舰级探索工具（启发自 CodeGraph）】：1 次调用直出全链路业务上下文。
-    自动结合自然语言语义检索与多语言代码知识图谱，聚合返回入口路由、核心实现、上下游依赖与源码证据，
-    彻底避免多次调用 read/grep 翻找文件，极大节省 Token 与工具交互轮次。
+    """Flagship exploration tool: single-call end-to-end surgical context.
+    Combines semantic search with AST call graphs to return entry points, core logic, callers, dependencies, and code evidence, avoiding repetitive grep/read rounds.
 
     Args:
-        query: 业务功能或架构疑问（如“用户登录鉴权与密码哈希校验流程”、“在线支付与退款逻辑”）
-        path: 代码库根目录路径（可选，默认当前项目）
-        top_k: 聚合的核心入口数量（默认 2 个）
+        query: Feature workflow or architectural question (e.g. 'user login authentication and password verification', 'payment refund processing')
+        path: Repository root path (optional, defaults to current project)
+        top_k: Number of entry points to aggregate (default: 2)
 
     Returns:
-        包含入口定义、外部路由、上游调用方、下游依赖及核心源码的手术级 Markdown 报告
+        Surgical Markdown report with entry points, routes, call hierarchy, and source code
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+            return "Error: Could not resolve target repository path. Please provide 'path'."
 
         engine = CodeGraphEngine.get_instance(target_repo)
         res = engine.explore_feature(query=query, top_k=top_k)
         if res.get("status") == "success":
             return res.get("surgical_context_markdown", "")
-        return res.get("message", "探索失败")
+        return res.get("message", "Exploration failed")
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] explore_codebase 发生错误: {e}\n")
-        return f"探索代码库失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] explore_codebase error: {e}\n")
+        return f"Codebase exploration failed: {str(e)}"
 
 
 @mcp.tool()
 def get_symbol_callers(symbol_name: str, path: str = "", limit: int = 30, offset: int = 0) -> str:
-    """查询代码库中谁调用了该函数或类（Call Graph 上游调用关系追踪）。
-    返回所有调用方符号、所在文件、行号、触发路由及代码预览。
+    """Find who calls a specific function or class across the codebase (Upstream Call Graph Tracking).
+    Returns calling symbols, files, line numbers, Web routes, and code snippets.
 
     Args:
-        symbol_name: 目标符号名称（如 "verify_password" 或 "AuthService.login"）
-        path: 代码库根目录路径（可选，默认当前项目）
+        symbol_name: Target symbol name (e.g. 'verify_password' or 'AuthService.login')
+        path: Repository root path (optional, defaults to current project)
 
     Returns:
-        上游调用者列表及代码证据 Markdown
+        Markdown report of upstream callers and code previews
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+            return "Error: Could not resolve target repository path. Please provide 'path'."
 
         engine = CodeGraphEngine.get_instance(target_repo)
         res = engine.get_callers(symbol_name)
         return format_callers_markdown(res)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] get_symbol_callers 发生错误: {e}\n")
-        return f"查询上游调用方失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] get_symbol_callers error: {e}\n")
+        return f"Failed to get symbol callers: {str(e)}"
 
 
 @mcp.tool()
 def get_symbol_callees(symbol_name: str, path: str = "", limit: int = 50, offset: int = 0) -> str:
-    """查询指定函数或方法内部直接调用的下游模块与函数列表（Call Graph 下游依赖追踪）。
-    标明调用的符号是否在仓库内定义及其所在文件与功能说明。
+    """Find downstream functions and methods directly called by a symbol (Downstream Dependency Tracking).
+    Identifies in-repo definitions versus external library dependencies.
 
     Args:
-        symbol_name: 目标符号名称（如 "login_api" 或 "OrderManager.CreateOrder"）
-        path: 代码库根目录路径（可选，默认当前项目）
+        symbol_name: Target symbol name (e.g. 'login_api' or 'OrderManager.CreateOrder')
+        path: Repository root path (optional, defaults to current project)
 
     Returns:
-        下游依赖清单 Markdown
+        Markdown report of downstream dependencies
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+            return "Error: Could not resolve target repository path. Please provide 'path'."
 
         engine = CodeGraphEngine.get_instance(target_repo)
         res = engine.get_callees(symbol_name)
         return format_callees_markdown(res)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] get_symbol_callees 发生错误: {e}\n")
-        return f"查询下游依赖失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] get_symbol_callees error: {e}\n")
+        return f"Failed to get symbol callees: {str(e)}"
 
 
 @mcp.tool()
 def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3) -> str:
-    """【改动影响面分析（Blast Radius）】：在重构或修改代码前调用，
-    通过调用图扩散分析该符号被哪些上游模块、测试和外部 Web/API 路由直接或间接依赖，防止改出未预料的线上 Bug。
+    """Change Impact Blast-Radius Analysis: Run before modifying or refactoring code.
+    Traverses the call graph to determine which upstream modules, test cases, and exposed Web APIs will be impacted.
 
     Args:
-        symbol_name: 准备修改的目标符号（如 "hash_password"、"processPayment"）
-        path: 代码库根目录路径（可选，默认当前项目）
-        max_depth: 追踪扩散的最大层级（默认 3 层）
+        symbol_name: Target symbol to modify (e.g. 'hash_password', 'processPayment')
+        path: Repository root path (optional, defaults to current project)
+        max_depth: Maximum propagation depth (default: 3)
 
     Returns:
-        爆炸半径评估报告（包含受影响符号数、文件清单、受波及 API 路由及扩散树）
+        Blast-radius assessment report with impacted symbols, files, API routes, and propagation tree
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+            return "Error: Could not resolve target repository path. Please provide 'path'."
 
         engine = CodeGraphEngine.get_instance(target_repo)
         res = engine.get_impact_radius(symbol_name, max_depth=max_depth)
         return format_impact_markdown(res)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] get_impact_radius 发生错误: {e}\n")
-        return f"影响面分析失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] get_impact_radius error: {e}\n")
+        return f"Failed to analyze impact radius: {str(e)}"
 
 
 @mcp.tool()
 def find_references(symbol_or_keyword: str, path: str = "") -> str:
-    """全仓库跨模块反向引用查询 (Find All References, Fix #20)。
-    同时聚合 AST 结构化调用者 (Structural Callers) 与 ripgrep 跨文件字面量/配置项引用 (Textual References)。
-    适用场景：查询某个 API、函数、错误码或配置项在全仓库中被哪些地方读取或调用。
+    """Cross-module reference analysis (Find All References).
+    Aggregates both AST structural callers and ripgrep exact textual/config references.
 
     Args:
-        symbol_or_keyword: 目标函数名、方法名、配置项 Key、错误码或文本
-        path: 代码库根目录路径（可选，未指定时默认当前项目）
+        symbol_or_keyword: Target function name, method name, config key, error code, or literal
+        path: Repository root path (optional, defaults to current project)
 
     Returns:
-        包含显式代码调用与配置文件字面量引用的完整 Markdown 报告
+        Markdown report of explicit code callers and configuration string references
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。请在参数中提供 path。"
+            return "Error: Could not resolve target repository path. Please provide 'path'."
 
         graph = CodeGraphEngine.get_instance(target_repo)
         res = graph.find_references(symbol_or_keyword)
         return format_references_markdown(res)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] find_references 发生错误: {e}\n")
-        return f"查询反向引用失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] find_references error: {e}\n")
+        return f"Failed to find references: {str(e)}"
 
 
 @mcp.tool()
 def get_watch_status(path: str = "") -> str:
-    """获取代码库实时热监听器（Watcher）的运行状态与增量同步历史。
-    实时监控 Python/TS/JS/Go 源文件的保存与增删，毫秒级增量更新索引。
+    """Get status and sync history of the live repository file watcher.
+    Monitors source files for changes and performs sub-second incremental indexing on save.
 
     Args:
-        path: 代码库根目录路径（可选，默认当前项目）
+        path: Repository root path (optional, defaults to current project)
 
     Returns:
-        包含监听器状态、防抖配置、同步统计与最近事件的 Markdown 报告
+        Markdown report with watcher status, debounce settings, and recent file events
     """
     try:
         target_repo = resolve_repo_path(path)
         if target_repo is None or not target_repo.exists():
-            return "错误: 未能推断或找到目标代码库路径。"
+            return "Error: Could not resolve target repository path."
 
         watcher = get_or_create_watcher(target_repo, auto_start=False)
         is_active = watcher.is_running
-        status_badge = "🟢 正在运行 (Active)" if is_active else "⚪ 未启动 (Inactive)"
+        status_badge = "🟢 Active (Running)" if is_active else "⚪ Inactive"
 
         lines = [
-            "### 📡 代码库实时热监听状态 (Watch Status)",
-            f"- **监控仓库**: `{target_repo}`",
-            f"- **当前状态**: {status_badge}",
-            f"- **防抖延迟**: {watcher.debounce_ms} ms (连续保存聚合)",
-            f"- **已完成同步次数**: {watcher.sync_count} 次",
-            f"- **最近同步时间**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(watcher.last_sync_time)) if watcher.last_sync_time else '暂无变更同步'}",
+            "### 📡 Live File Watcher Status",
+            f"- **Repository**: `{target_repo}`",
+            f"- **Status**: {status_badge}",
+            f"- **Debounce Delay**: {watcher.debounce_ms} ms",
+            f"- **Total Incremental Syncs**: {watcher.sync_count}",
+            f"- **Last Sync Time**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(watcher.last_sync_time)) if watcher.last_sync_time else 'None'}",
         ]
 
         if not is_active:
-            lines.append("\n> 💡 提示: 监听器未启动。可调用 `index_codebase()` 建立索引并自动激活后台热监听。")
+            lines.append("\n> 💡 Tip: Watcher is inactive. Run `index_codebase()` to initialize index and start live watcher.")
         else:
-            lines.append("\n> ⚡ 提示: 当您在编辑器中保存代码时，后台将自动在 0.3s 内完成 AST 解析与向量增量同步，无需重新全量索引。")
+            lines.append("\n> ⚡ Tip: Saving files in your editor will automatically trigger incremental AST & vector sync within ~0.3s.")
 
         if watcher.recent_events:
-            lines.append("\n#### ⏱️ 最近文件同步历史 (Recent Sync Events)")
-            lines.append("| 触发时间 | 变更文件 | 同步动作 | 提取代码块 |")
+            lines.append("\n#### ⏱️ Recent Sync Events")
+            lines.append("| Timestamp | File Path | Action | Chunks |")
             lines.append("| :--- | :--- | :--- | :--- |")
             for ev in reversed(watcher.recent_events[-10:]):
-                action = "增量更新" if ev.get("status") == "updated" else "移除索引"
+                action = "Updated" if ev.get("status") == "updated" else "Deleted"
                 lines.append(f"| {ev.get('time')} | `{ev.get('file')}` | {action} | {ev.get('chunks', 0)} |")
 
         return "\n".join(lines)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] get_watch_status 发生错误: {e}\n")
-        return f"获取监听状态失败: {str(e)}"
+        sys.stderr.write(f"[code-search-graph] get_watch_status error: {e}\n")
+        return f"Failed to get watch status: {str(e)}"
 
 
 def run_server():
-    """以标准 stdio 运行 FastMCP 服务，并在启动时对已知仓库自动拉起热监听"""
+    """Run FastMCP server over standard stdio protocol with auto-watcher activation"""
     try:
         target_repo = resolve_repo_path("")
         if target_repo and target_repo.exists():
@@ -411,7 +409,7 @@ def run_server():
             if db_dir.exists():
                 get_or_create_watcher(target_repo, auto_start=True)
     except Exception as e:
-        sys.stderr.write(f"[code-search-mcp] 服务启动自动拉起热监听异常: {e}\n")
+        sys.stderr.write(f"[code-search-graph] Server startup watcher error: {e}\n")
 
     mcp.run()
 

@@ -122,14 +122,14 @@ class ExactSearchEngine:
                     max_results=max_results,
                 )
                 return {
-                    "engine": "ripgrep (工业级 Rust SIMD 加速)",
+                    "engine": "ripgrep (Rust SIMD accelerated)",
                     "pattern": pattern,
                     "matches": results,
                 }
             except Exception as e:
-                sys.stderr.write(f"[code-search-mcp] ripgrep 调用异常，自动切换内置引擎: {e}\n")
+                sys.stderr.write(f"[code-search-graph] ripgrep execution error, falling back to built-in engine: {e}\n")
 
-        # 优雅回退
+        # Fallback
         results = self._search_with_python(
             pattern=pattern,
             is_regex=is_regex,
@@ -138,7 +138,7 @@ class ExactSearchEngine:
             max_results=max_results,
         )
         return {
-            "engine": "内置多线程文本引擎 (提示: 系统安装 ripgrep 可体验极致毫秒加速)",
+            "engine": "Built-in multi-threaded text engine",
             "pattern": pattern,
             "matches": results,
         }
@@ -229,7 +229,7 @@ class ExactSearchEngine:
             else:
                 regex_matcher = re.compile(re.escape(pattern), flags)
         except re.error as e:
-            sys.stderr.write(f"[code-search-mcp] 正则表达式无效 '{pattern}': {e}\n")
+            sys.stderr.write(f"[code-search-graph] Invalid regular expression '{pattern}': {e}\n")
             return []
 
         glob_pat = None
@@ -278,17 +278,17 @@ class ExactSearchEngine:
 
 
 def format_exact_results(result_dict: Dict[str, Any]) -> str:
-    """将精准搜索结果格式化为极省 Token、带确凿证据的 Markdown 报告"""
+    """Format exact search results into token-efficient Markdown evidence report"""
     pattern = result_dict.get("pattern", "")
     engine = result_dict.get("engine", "")
     matches: List[MatchItem] = result_dict.get("matches", [])
 
     if not matches:
-        return f"未找到包含确切字符串/模式 \"{pattern}\" 的匹配项。"
+        return f"No exact matches found for pattern \"{pattern}\"."
 
     lines = [
-        f"## 🎯 确凿字面量检索结果: \"{pattern}\" (找到 {len(matches)} 处匹配)",
-        f"> **检索引擎**: `{engine}` | **证据信度**: `100% 确凿事实 (Exact Match)`\n",
+        f"## 🎯 Exact Matches: \"{pattern}\" ({len(matches)} matches found)",
+        f"> **Engine**: `{engine}` | **Confidence**: `100% Exact Match`\n",
     ]
 
     for i, m in enumerate(matches, start=1):

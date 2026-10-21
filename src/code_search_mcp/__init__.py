@@ -1,4 +1,4 @@
-"""code-search-mcp: 本地轻量代码语义搜索 MCP 服务"""
+"""code-search-graph: Local AST Call Graph & Intelligent Hybrid Semantic Code Search Engine"""
 
 from code_search_mcp.cli import main
 from code_search_mcp.indexer import CodeIndexer

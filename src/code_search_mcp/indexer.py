@@ -200,7 +200,7 @@ class UniversalCodeChunker:
         try:
             symbols = self.ts_parser.parse_file(file_path, rel_path=rel_path, include_calls=include_calls)
         except Exception as e:
-            sys.stderr.write(f"[code-search-mcp] AST 解析异常，降级为文本分块 {rel_path}: {e}\n")
+            sys.stderr.write(f"[code-search-graph] AST parse error, falling back to text chunking for {rel_path}: {e}\n")
             return self._fallback_text_chunks(file_path, rel_path, lang)
 
         chunks: List[CodeChunk] = []
@@ -359,20 +359,21 @@ class CodeIndexer:
         skip_vector: bool = False,
         force_vector: bool = False,
         vector_threshold: int = 2000,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """全量切片、真流式持久化至 SQLite (结构图谱) 与 LanceDB (向量库)，彻底解决超大仓库 OOM 137"""
-        sys.stderr.write(f"[code-search-mcp] 开始扫描多语言代码库: {self.repo_path}\n")
+        sys.stderr.write(f"[code-search-graph] Scanning repository: {self.repo_path}\n")
         files = self.scan_files()
         file_count = len(files)
-        sys.stderr.write(f"[code-search-mcp] 找到 {file_count} 个多语言源文件\n")
+        sys.stderr.write(f"[code-search-graph] Discovered {file_count} source files\n")
 
-        # 超大代码库智能探测与降级
+        # Intelligent large repository detection and graceful fallback
         if file_count > vector_threshold and not force_vector and not skip_vector:
             skip_vector = True
             sys.stderr.write(
-                f"[code-search-mcp] ⚠️ 检测到大型代码库 (共 {file_count} 个源文件 > 阈值 {vector_threshold})。\n"
-                f"[code-search-mcp] 自动激活轻量结构化索引模式：构建架构大纲、CodeGraph 调用图谱 (SQLite) 与 ripgrep 确切检索，跳过耗时且高内存的向量嵌入以杜绝 OOM。\n"
-                f"[code-search-mcp] (若仍需全量向量搜索，可通过 CLI 参数 --force-vector 或 MCP 参数 force_vector=True 强制启用流式嵌入)\n"
+                f"[code-search-graph] ⚠️ Large repository detected ({file_count} source files > threshold {vector_threshold}).\n"
+                f"[code-search-graph] Activating lightweight structured mode: AST outline, AST call graph (SQLite) and ripgrep exact search (skipping heavy vector embedding to prevent OOM).\n"
+                f"[code-search-graph] (Use --force-vector via CLI or force_vector=True via MCP to force full vectorization)\n"
             )
             sys.stderr.flush()
 
@@ -435,8 +436,8 @@ class CodeIndexer:
         reused_total = 0
         embedded_total = 0
 
-        mode_desc = "轻量结构化模式 (免向量)" if skip_vector else "真流式低显存向量模式"
-        sys.stderr.write(f"[code-search-mcp] 开始流式解析与持久化 [{mode_desc}]...\n")
+        mode_desc = "lightweight structured mode (no vectors)" if skip_vector else "streaming vector & AST graph mode"
+        sys.stderr.write(f"[code-search-graph] Streaming indexing & persistence [{mode_desc}]...\n")
         sys.stderr.flush()
 
         def _flush_batch(batch: List[CodeChunk]) -> Any:
@@ -506,19 +507,25 @@ class CodeIndexer:
 
             return table
 
-        for f in files:
+        for idx, f in enumerate(files, 1):
             try:
                 file_chunks = chunker.parse_file(f)
-                if not file_chunks:
-                    continue
-                current_batch.extend(file_chunks)
-                if len(current_batch) >= STREAM_BATCH_SIZE:
-                    total_chunks += len(current_batch)
-                    _flush_batch(current_batch)
-                    current_batch.clear()
-                    gc.collect()
+                if file_chunks:
+                    current_batch.extend(file_chunks)
+                    if len(current_batch) >= STREAM_BATCH_SIZE:
+                        total_chunks += len(current_batch)
+                        _flush_batch(current_batch)
+                        current_batch.clear()
+                        gc.collect()
             except Exception as e:
-                sys.stderr.write(f"[code-search-mcp] 警告: 处理文件 {f} 异常，跳过: {e}\n")
+                sys.stderr.write(f"[code-search-graph] Warning: Failed to parse file {f}: {e}\n")
+            finally:
+                if progress_callback is not None:
+                    try:
+                        rel = str(f.relative_to(self.repo_path)).replace("\\", "/")
+                    except Exception:
+                        rel = f.name
+                    progress_callback(idx, file_count, rel, total_chunks + len(current_batch))
 
         if current_batch:
             total_chunks += len(current_batch)
@@ -533,7 +540,7 @@ class CodeIndexer:
         gc.collect()
 
         if reused_total > 0:
-            sys.stderr.write(f"[code-search-mcp] 命中向量缓存: {reused_total} 个代码块已复用，实际推理 {embedded_total} 个新/改动代码块\n")
+            sys.stderr.write(f"[code-search-graph] Vector cache hit: {reused_total} chunks reused, {embedded_total} chunks computed\n")
             sys.stderr.flush()
 
         existing_vectors_map.clear()
@@ -569,7 +576,7 @@ class CodeIndexer:
         except Exception:
             pass
 
-        sys.stderr.write(f"[code-search-mcp] 索引与调用图谱构建完成！共 {len(files)} 文件，{total_chunks} 代码块\n")
+        sys.stderr.write(f"[code-search-graph] Indexing and call graph completed: {len(files)} files, {total_chunks} code chunks\n")
         return {
             "status": "success",
             "repo_path": str(self.repo_path),
@@ -632,7 +639,7 @@ class CodeIndexer:
                 pass
             return True
         except Exception as e:
-            sys.stderr.write(f"[code-search-mcp] 从索引删除文件 {rel_path} 失败: {e}\n")
+            sys.stderr.write(f"[code-search-graph] Failed to delete file {rel_path} from index: {e}\n")
             return False
 
     def index_file_incremental(self, file_path: str | Path) -> Dict[str, Any]:
@@ -673,7 +680,7 @@ class CodeIndexer:
         try:
             new_chunks = chunker.parse_file(f)
         except Exception as e:
-            sys.stderr.write(f"[code-search-mcp] 警告: 增量解析文件 {f} 异常: {e}\n")
+            sys.stderr.write(f"[code-search-graph] Warning: Incremental parse error for {f}: {e}\n")
             new_chunks = []
         if not new_chunks:
             try:

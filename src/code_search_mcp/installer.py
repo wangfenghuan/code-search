@@ -1,14 +1,14 @@
-"""一键安装与全自动客户端配置模块 (One-Click Auto-Installer)
+"""One-Click Auto-Installer and MCP Client Configuration Wizard
 
-启发自 CodeGraph 与现代开发工具工程实践：
-彻底免去用户手动配置 JSON、找路径、配权限的繁琐步骤。
-支持一键自动检测并配置：
+Inspired by modern developer tooling best practices:
+Eliminates manual JSON edits, path lookups, and configuration errors.
+Automatically detects and configures:
 1. Claude Code (~/.claude.json)
 2. Claude Desktop (claude_desktop_config.json: Win / Mac / Linux)
-3. Cursor (.cursor/mcp.json 及全局设置)
+3. Cursor (.cursor/mcp.json and global storage)
 4. Windsurf (~/.codeium/windsurf/mcp_config.json)
-5. Cline / Roo Code (VS Code 扩展全局设置)
-6. 自动注入 CLAUDE.md / .cursorrules 最佳实践工具调用规则（防止 AI 上下文爆炸）
+5. Cline / Roo Code (VS Code Extension global settings)
+6. Injects token-efficient guidelines into CLAUDE.md / .cursorrules
 """
 
 import json
@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 def get_client_config_paths() -> Dict[str, Path]:
-    """根据操作系统自动解析主流 AI 客户端的 MCP 配置文件路径"""
+    """Resolve MCP client configuration file paths by OS"""
     home = Path.home()
     system = platform.system()
     paths: Dict[str, Path] = {}
@@ -38,7 +38,7 @@ def get_client_config_paths() -> Dict[str, Path]:
     else:
         paths["claude-desktop"] = home / ".config" / "Claude" / "claude_desktop_config.json"
 
-    # 3. Cursor (全局与当前工作区)
+    # 3. Cursor (workspace & global)
     paths["cursor-workspace"] = Path.cwd() / ".cursor" / "mcp.json"
     if system == "Windows":
         appdata = Path(os.getenv("APPDATA", str(home / "AppData" / "Roaming")))
@@ -51,7 +51,7 @@ def get_client_config_paths() -> Dict[str, Path]:
     # 4. Windsurf
     paths["windsurf"] = home / ".codeium" / "windsurf" / "mcp_config.json"
 
-    # 5. Cline (VS Code Extension)
+    # 5. Cline / Roo Code (VS Code Extension)
     if system == "Windows":
         appdata = Path(os.getenv("APPDATA", str(home / "AppData" / "Roaming")))
         paths["cline"] = appdata / "Code" / "User" / "globalStorage" / "saoudrizwan.claude-dev" / "settings" / "cline_mcp_settings.json"
@@ -71,17 +71,17 @@ def build_server_config(
     python_path: Optional[str] = None,
     repo_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """生成标准 MCP Server 配置块"""
+    """Generate standard MCP server configuration block"""
     if mode == "uvx":
         return {
             "command": "uvx",
-            "args": ["code-search-mcp", "serve"],
+            "args": ["code-search-graph", "serve"],
         }
     elif mode == "uv":
         base_dir = repo_path or str(Path.cwd().resolve())
         return {
             "command": "uv",
-            "args": ["--directory", base_dir, "run", "code-search-mcp", "serve"],
+            "args": ["--directory", base_dir, "run", "code-search-graph", "serve"],
         }
     elif mode == "python":
         py_bin = python_path or sys.executable
@@ -92,101 +92,102 @@ def build_server_config(
     elif mode == "docker":
         return {
             "command": "docker",
-            "args": ["run", "-i", "--rm", "-v", f"{repo_path or '.'}:/workspace", "code-search-mcp:latest"],
+            "args": ["run", "-i", "--rm", "-v", f"{repo_path or '.'}:/workspace", "code-search-graph:latest"],
         }
     else:
         return {
             "command": "uvx",
-            "args": ["code-search-mcp", "serve"],
+            "args": ["code-search-graph", "serve"],
         }
 
 
 def safe_merge_json(file_path: Path, server_key: str, server_config: Dict[str, Any]) -> Tuple[bool, str]:
-    """安全合并 JSON 配置，创建备份并保留用户已有的所有配置项"""
+    """Safely merge JSON configuration, creating backup and preserving existing entries"""
     try:
         data: Dict[str, Any] = {}
         if file_path.exists():
             try:
-                # 备份原始文件
                 backup_path = file_path.with_suffix(f"{file_path.suffix}.bak")
                 shutil.copy2(file_path, backup_path)
                 data = json.loads(file_path.read_text(encoding="utf-8"))
             except Exception:
                 data = {}
 
-        # 确保根键为 dict
         if not isinstance(data, dict):
             data = {}
 
-        # 针对不同客户端的 schema 进行针对性合并
         if "mcpServers" not in data:
             data["mcpServers"] = {}
+
+        # Replace legacy key if present
+        if "code-search-mcp" in data["mcpServers"] and server_key == "code-search-graph":
+            del data["mcpServers"]["code-search-mcp"]
 
         data["mcpServers"][server_key] = server_config
 
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        return True, f"已安全写入配置 -> {file_path}"
+        return True, f"Configuration written -> {file_path}"
     except Exception as e:
-        return False, f"写入失败 {file_path}: {e}"
+        return False, f"Failed to write {file_path}: {e}"
 
 
-RECOMMENDED_RULES_CONTENT = """# Code Search & Architecture MCP Guidelines (启发自 CodeGraph)
+RECOMMENDED_RULES_CONTENT = """# Code Search & Architecture MCP Guidelines
 
-本项目已接入 `code-search-mcp` 本地代码知识图谱与语义检索服务。在探索、重构和编写代码时，请遵循以下规则以节省 Token 与最大化准确率：
+This project is integrated with `code-search-graph` local code knowledge graph and semantic search service. When exploring, refactoring, or authoring code, follow these guidelines to minimize token usage and maximize accuracy:
 
-## 1. 探索与定位
-- **了解全貌**: 优先调用 `get_codebase_outline()` 查看全局多语言架构地图，了解各模块核心职责，避免盲目全盘搜索。
-- **业务全链路**: 询问业务功能（如“用户认证流程”、“支付退款逻辑”）时，**优先且仅需调用一次** `explore_codebase(query=...)`，直接获得包含路由入口、核心源码与下游拓扑的端到端报告。
-- **概念/意图搜索**: 当不知道确切函数名时，使用 `search_codebase(query=...)`，默认以 `compact` 紧凑模式返回代码摘要。
-- **字面量/配置项搜索**: 已知确切标识符、错误码、环境变量 Key 时，使用 `exact_search(pattern=...)`，基于 ripgrep 秒级定位。
+## 1. Exploration & Navigation
+- **High-Level Overview**: Call `get_codebase_outline()` first to view the multi-language architectural map and understand module responsibilities without blind grep searches.
+- **Feature Workflows**: When asking about business features (e.g., "user auth flow", "payment callback"), **call `explore_codebase(query=...)` once** to receive an end-to-end report containing routes, core logic, and downstream dependencies.
+- **Intent / Semantic Search**: When searching by natural language concepts rather than exact symbol names, use `search_codebase(query=...)` (returns compact code snippets by default).
+- **Exact Literals / Constants**: When searching exact identifiers, error codes, or config keys, use `exact_search(pattern=...)` for sub-second ripgrep search.
 
-## 2. 重构与改动保护（防线上故障）
-- **影响面评估**: 在修改或重构任何重要函数/类前，**必须先调用** `get_impact_radius(symbol_name=...)`，获取直接和间接波及的上游模块、关联文件与对外 Web 路由。
-- **调用拓扑追踪**: 
-  - 追踪谁调用了目标函数：`get_symbol_callers(symbol_name=...)`
-  - 追踪目标函数依赖了谁：`get_symbol_callees(symbol_name=...)`
-  - 全仓库反向引用分析：`find_references(symbol_name=...)`
+## 2. Refactoring & Blast-Radius Protection
+- **Impact Assessment**: Before modifying or refactoring critical functions or classes, **always call** `get_impact_radius(symbol_name=...)` to identify upstream callers, affected files, and exposed Web APIs.
+- **Call Hierarchy**:
+  - Trace callers: `get_symbol_callers(symbol_name=...)`
+  - Trace callees: `get_symbol_callees(symbol_name=...)`
+  - Cross-module references: `find_references(symbol_name=...)`
 
-## 3. Token 极省最佳实践
-- 严禁对大文件全量读取；若需查看某段函数完整实现，配合 `get_file_content(path, start_line, end_line)` 按需精准提取行区间。
+## 3. Token-Efficient Best Practices
+- Avoid reading entire large files; use `get_file_content(path, start_line, end_line)` to extract line-precise function implementations on demand.
 """
 
 
 def setup_workspace_rules(repo_dir: Path) -> List[str]:
-    """在指定工作区初始化或更新 CLAUDE.md 和 .cursorrules"""
+    """Initialize or update CLAUDE.md and .cursorrules in workspace"""
     messages = []
     # 1. CLAUDE.md
     claude_md = repo_dir / "CLAUDE.md"
     try:
         if claude_md.exists():
             existing = claude_md.read_text(encoding="utf-8")
-            if "code-search-mcp" not in existing:
+            if "code-search-graph" not in existing and "code-search-mcp" not in existing:
                 claude_md.write_text(existing.rstrip() + "\n\n" + RECOMMENDED_RULES_CONTENT, encoding="utf-8")
-                messages.append(f"✅ 已向已有 CLAUDE.md 追加工具使用规则 -> {claude_md}")
+                messages.append(f"✅ Appended guidelines to existing CLAUDE.md -> {claude_md}")
             else:
-                messages.append(f"ℹ️ CLAUDE.md 已包含 code-search-mcp 规范，跳过")
+                messages.append(f"ℹ️ CLAUDE.md already contains code-search-graph guidelines, skipped")
         else:
             claude_md.write_text(RECOMMENDED_RULES_CONTENT, encoding="utf-8")
-            messages.append(f"✅ 已创建 CLAUDE.md 最佳实践规则文件 -> {claude_md}")
+            messages.append(f"✅ Created CLAUDE.md with best practices -> {claude_md}")
     except Exception as e:
-        messages.append(f"⚠️ 写入 CLAUDE.md 失败: {e}")
+        messages.append(f"⚠️ Failed to write CLAUDE.md: {e}")
 
     # 2. .cursorrules
     cursor_rules = repo_dir / ".cursorrules"
     try:
         if cursor_rules.exists():
             existing = cursor_rules.read_text(encoding="utf-8")
-            if "code-search-mcp" not in existing:
+            if "code-search-graph" not in existing and "code-search-mcp" not in existing:
                 cursor_rules.write_text(existing.rstrip() + "\n\n" + RECOMMENDED_RULES_CONTENT, encoding="utf-8")
-                messages.append(f"✅ 已向已有 .cursorrules 追加工具使用规则 -> {cursor_rules}")
+                messages.append(f"✅ Appended guidelines to existing .cursorrules -> {cursor_rules}")
             else:
-                messages.append(f"ℹ️ .cursorrules 已包含规则，跳过")
+                messages.append(f"ℹ️ .cursorrules already contains guidelines, skipped")
         else:
             cursor_rules.write_text(RECOMMENDED_RULES_CONTENT, encoding="utf-8")
-            messages.append(f"✅ 已创建 .cursorrules 最佳实践规则文件 -> {cursor_rules}")
+            messages.append(f"✅ Created .cursorrules with best practices -> {cursor_rules}")
     except Exception as e:
-        messages.append(f"⚠️ 写入 .cursorrules 失败: {e}")
+        messages.append(f"⚠️ Failed to write .cursorrules: {e}")
 
     return messages
 
@@ -197,9 +198,9 @@ def run_installer(
     target_repo: Optional[Path] = None,
     write_rules: bool = True,
 ) -> None:
-    """执行一键安装配置向导"""
+    """Run one-click installer and configuration wizard"""
     print("\n" + "=" * 65)
-    print("🚀 code-search-mcp Auto-Installer & Client Configuration Wizard")
+    print("🚀 code-search-graph Auto-Installer & Client Configuration Wizard")
     print("=" * 65)
 
     all_paths = get_client_config_paths()
@@ -215,7 +216,7 @@ def run_installer(
         elif shutil.which("uvx"):
             selected_mode = "uvx"
             py_path = None
-            print("📦 Detected uvx installed, using zero-install execution mode (uvx code-search-mcp)")
+            print("📦 Detected uvx installed, using zero-install execution mode (uvx code-search-graph)")
         elif shutil.which("uv"):
             selected_mode = "uv"
             py_path = None
@@ -248,7 +249,7 @@ def run_installer(
 
         should_write = parent_exists or is_workspace or cfg_path.exists()
         if should_write:
-            ok, msg = safe_merge_json(cfg_path, "code-search-mcp", server_config)
+            ok, msg = safe_merge_json(cfg_path, "code-search-graph", server_config)
             status_icon = "✅" if ok else "❌"
             print(f"  {status_icon} [{client_name.upper()}] {msg}")
             if ok:

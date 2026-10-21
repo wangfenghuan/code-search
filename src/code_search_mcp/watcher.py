@@ -17,7 +17,7 @@ except ImportError:
 
 
 class CodeFilter:
-    """过滤监控目录与文件，忽略依赖库、缓存文件与非源代码"""
+    """Filter monitored directories and files, ignoring dependencies, caches, and non-source files"""
 
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path.resolve()
@@ -25,17 +25,17 @@ class CodeFilter:
 
     def __call__(self, change: Any, path_str: str) -> bool:
         p = Path(path_str)
-        # 忽略隐藏文件或忽略目录
+        # Ignore hidden files or ignored directories
         for part in p.parts:
             if part in DEFAULT_IGNORE_DIRS or (part.startswith(".") and part != "."):
                 return False
 
-        # 仅关注支持的编程语言后缀
+        # Only track supported language extensions
         ext = p.suffix.lower()
         if ext not in self.supported_exts:
             return False
 
-        # 忽略临时文件
+        # Ignore temporary files
         if p.name.startswith("~") or p.name.startswith(".#") or p.name in DEFAULT_IGNORE_FILES:
             return False
 
@@ -43,14 +43,7 @@ class CodeFilter:
 
 
 class RepoWatcher:
-    """代码库实时热监听器 (启发自 CodeGraph)
-
-    核心机制:
-    1. 采用操作系统原生事件通知 (Windows ReadDirectoryChangesW / Linux inotify / macOS FSEvents)
-    2. 防抖聚合 (Debounce 1500ms): 编辑器快速连续保存时自动合并为单次更新
-    3. 增量热更新: 单文件变更仅重新解析该文件，0.3s 内完成 AST 抽取与向量追加
-    4. 零输出污染: 所有通知严格流向 sys.stderr，绝不破坏 MCP JSON-RPC 通信
-    """
+    """Real-time repository file watcher"""
 
     def __init__(self, repo_path: str | Path, debounce_ms: int = 1500):
         self.repo_path = Path(repo_path).resolve()
@@ -64,7 +57,7 @@ class RepoWatcher:
         self.recent_events: List[Dict[str, Any]] = []
 
     def start(self) -> bool:
-        """在后台守护线程中启动文件监听"""
+        """Start background file watcher in a daemon thread"""
         if self.is_running:
             return True
 
@@ -75,16 +68,16 @@ class RepoWatcher:
         self._thread = threading.Thread(target=self._run_loop, name=f"Watcher-{self.repo_path.name}", daemon=True)
         self._thread.start()
         self.is_running = True
-        sys.stderr.write(f"[code-search-mcp] [热监听] 已启动后台文件监控: {self.repo_path} (防抖: {self.debounce_ms}ms)\n")
+        sys.stderr.write(f"[code-search-graph] [Watcher] Started background watcher for {self.repo_path} (debounce: {self.debounce_ms}ms)\n")
         return True
 
     def stop(self):
-        """停止文件监听"""
+        """Stop file watcher"""
         if not self.is_running:
             return
         self._stop_event.set()
         self.is_running = False
-        sys.stderr.write(f"[code-search-mcp] [热监听] 已停止后台文件监控: {self.repo_path}\n")
+        sys.stderr.write(f"[code-search-graph] [Watcher] Stopped background watcher for {self.repo_path}\n")
 
     def _run_loop(self):
         if HAS_WATCHFILES:
@@ -105,15 +98,15 @@ class RepoWatcher:
                     break
                 self._handle_changes(changes)
         except Exception as e:
-            sys.stderr.write(f"[code-search-mcp] [热监听异常] watchfiles 监控失败: {e}\n")
+            sys.stderr.write(f"[code-search-graph] [Watcher Error] watchfiles monitoring error: {e}\n")
             self.is_running = False
 
     def _run_fallback_polling_loop(self):
-        """降级方案：当未安装 watchfiles 时，使用轻量 mtime 轮询"""
+        """Fallback polling when watchfiles is not installed"""
         supported_exts = set(EXTENSION_LANG_MAP.keys())
         last_mtimes: Dict[str, float] = {}
 
-        # 初始快照
+        # Initial snapshot
         for root, dirs, files in os.walk(self.repo_path):
             dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")]
             for f in files:
@@ -145,7 +138,7 @@ class RepoWatcher:
                         except Exception:
                             pass
 
-            # 检查删除的文件
+            # Check deleted files
             deleted_files = set(last_mtimes.keys()) - current_files
             for df in deleted_files:
                 changed_files.add(df)
@@ -173,7 +166,7 @@ class RepoWatcher:
                 rel_path = str(file_path).replace("\\", "/")
 
             res = self.indexer.index_file_incremental(file_path)
-            status_text = "增量更新" if res.get("status") == "updated" else "移除索引"
+            status_text = "updated" if res.get("status") == "updated" else "deleted"
             chunks_num = res.get("chunks_count", 0)
 
             event = {
@@ -189,20 +182,20 @@ class RepoWatcher:
             t1 = time.perf_counter()
             elapsed_ms = (t1 - t0) * 1000
             sys.stderr.write(
-                f"[code-search-mcp] [热更新] {rel_path} ({status_text}, {chunks_num} 块代码) -> 耗时 {elapsed_ms:.1f}ms\n"
+                f"[code-search-graph] [Watcher] {rel_path} ({status_text}, {chunks_num} chunks) -> {elapsed_ms:.1f}ms\n"
             )
 
         self.last_sync_time = time.time()
         self.sync_count += len(changed_paths)
 
 
-# 全局多代码库监听器管理器
+# Global multi-repo watcher manager
 _watchers_lock = threading.Lock()
 _active_watchers: Dict[str, RepoWatcher] = {}
 
 
 def get_or_create_watcher(repo_path: str | Path, auto_start: bool = True) -> RepoWatcher:
-    """获取或为目标仓库创建单例热监听器"""
+    """Get or create singleton repo watcher for target repository"""
     resolved = str(Path(repo_path).resolve())
     with _watchers_lock:
         if resolved not in _active_watchers:
@@ -215,7 +208,7 @@ def get_or_create_watcher(repo_path: str | Path, auto_start: bool = True) -> Rep
 
 
 def get_all_watchers_status() -> List[Dict[str, Any]]:
-    """获取所有活跃代码库的监控状态"""
+    """Get watcher status for all active repositories"""
     with _watchers_lock:
         results = []
         for path_str, watcher in _active_watchers.items():
@@ -226,7 +219,7 @@ def get_all_watchers_status() -> List[Dict[str, Any]]:
                     "sync_count": watcher.sync_count,
                     "last_sync": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(watcher.last_sync_time))
                     if watcher.last_sync_time
-                    else "未发生同步",
+                    else "Never",
                     "recent_events": list(watcher.recent_events),
                 }
             )
