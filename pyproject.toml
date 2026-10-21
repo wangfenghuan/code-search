@@ -1,6 +1,6 @@
 [project]
 name = "code-search-graph"
-version = "0.8.1"
+version = "0.8.2"
 description = "Fast, intelligent, multi-language code search and AST call graph MCP server for AI assistants (Python, TypeScript, JavaScript, Vue, Go, Java, Rust)"
 readme = "README.md"
 license = { text = "MIT" }
