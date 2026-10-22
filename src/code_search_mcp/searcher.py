@@ -168,12 +168,13 @@ class CodeSearcher:
         candidate_limit = max(top_k * 6, 40)
         candidates_map: Dict[str, Dict[str, Any]] = {}
 
-        # 提取 query 关键符号词集（包含原始与 Camel/Snake 拆解词）
+        # 提取 query 关键符号词集（包含 ASCII 标识符、Camel/Snake 拆解词以及中文词元）
         raw_tokens = re.findall(r"[a-zA-Z0-9_]{2,}", query.lower())
         split_tokens = []
         for tok in raw_tokens:
             split_tokens.extend(split_camel_snake_case(tok))
-        all_query_tokens = list(dict.fromkeys(raw_tokens + split_tokens))
+        cjk_tokens = re.findall(r"[\u4e00-\u9fff]{1,}", query)
+        all_query_tokens = list(dict.fromkeys(raw_tokens + split_tokens + cjk_tokens))
 
         dense_rank: Dict[str, int] = {}
         sparse_rank: Dict[str, int] = {}
@@ -268,17 +269,18 @@ class CodeSearcher:
                     clauses = []
                     params = []
                     for tok in all_query_tokens[:5]:
-                        clauses.append("(symbol_name LIKE ? OR route_info LIKE ? OR code LIKE ?)")
-                        params.extend([f"%{tok}%", f"%{tok}%", f"%{tok}%"])
-                    where_clause = " OR ".join(clauses) if clauses else "1=1"
-                    sql = f"SELECT id, file_path, symbol_name, chunk_type, start_line, end_line, code, docstring, route_info, module_name, qualified_name FROM nodes WHERE {where_clause} LIMIT {candidate_limit}"
-                    rows = conn.execute(sql, params).fetchall()
-                    for s_idx, r in enumerate(rows):
-                        r_dict = dict(r)
-                        cid = str(r_dict.get("id"))
-                        if cid not in candidates_map:
-                            candidates_map[cid] = r_dict
-                        sparse_rank[cid] = s_idx
+                        clauses.append("(symbol_name LIKE ? OR route_info LIKE ? OR code LIKE ? OR docstring LIKE ?)")
+                        params.extend([f"%{tok}%", f"%{tok}%", f"%{tok}%", f"%{tok}%"])
+                    if clauses:
+                        where_clause = " OR ".join(clauses)
+                        sql = f"SELECT id, file_path, symbol_name, chunk_type, start_line, end_line, code, docstring, route_info, module_name, qualified_name FROM nodes WHERE {where_clause} LIMIT {candidate_limit}"
+                        rows = conn.execute(sql, params).fetchall()
+                        for s_idx, r in enumerate(rows):
+                            r_dict = dict(r)
+                            cid = str(r_dict.get("id"))
+                            if cid not in candidates_map:
+                                candidates_map[cid] = r_dict
+                            sparse_rank[cid] = s_idx
                     conn.close()
                 except Exception:
                     pass
@@ -289,7 +291,7 @@ class CodeSearcher:
         ripgrep_rank: Dict[str, int] = {}
         ripgrep_hits: Dict[str, int] = defaultdict(int)
 
-        rg_tokens: List[str] = [t for t in all_query_tokens if len(t) >= 3 and not t.isdigit()][:4]
+        rg_tokens: List[str] = [t for t in all_query_tokens if len(t) >= 2 and not t.isdigit()][:4]
         for token in rg_tokens:
             try:
                 rg_res = self.exact_engine.search(
@@ -418,6 +420,7 @@ class CodeSearcher:
                 }
             )
 
+        scored_candidates = [c for c in scored_candidates if c["similarity"] > 0.0]
         scored_candidates.sort(
             key=lambda x: (
                 x["similarity"],

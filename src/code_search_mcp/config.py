@@ -113,11 +113,43 @@ def get_repo_db_path(repo_path: str | Path) -> Path:
 
 
 def resolve_repo_path(repo_path: str | Path | None = None) -> Path:
-    """Resolve repository path: validates provided path or falls back to /workspace, last_repo, or cwd"""
+    """Resolve repository path with predictable precedence:
+    1. Explicit path argument (if valid and directory exists)
+    2. Current working directory Path.cwd() (if it was indexed or is a source/git repository)
+    3. Docker container mount priority (/workspace)
+    4. Most recently indexed repository (last_repo.txt)
+    5. Current working directory Path.cwd()
+    """
     if repo_path:
         p = Path(repo_path).resolve()
         if p.exists() and p.is_dir():
             return p
+
+    cwd = Path.cwd().resolve()
+    # If cwd has been indexed or is a git repository, ALWAYS respect current working directory!
+    cwd_db = get_repo_db_path(cwd)
+    if (cwd_db / "meta.json").exists() or (cwd / ".git").exists():
+        return cwd
+
+    # If cwd contains common project markers, prefer cwd
+    project_markers = (
+        "src",
+        "lib",
+        "app",
+        "main",
+        "pom.xml",
+        "package.json",
+        "pyproject.toml",
+        "Cargo.toml",
+        "go.mod",
+        "settings.gradle",
+        "build.gradle",
+    )
+    try:
+        if any((cwd / marker).exists() for marker in project_markers):
+            return cwd
+    except Exception:
+        pass
 
     # Docker container mount priority
     docker_ws = Path("/workspace")
@@ -138,5 +170,5 @@ def resolve_repo_path(repo_path: str | Path | None = None) -> Path:
         except Exception:
             pass
 
-    return Path.cwd().resolve()
+    return cwd
 

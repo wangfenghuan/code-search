@@ -233,58 +233,107 @@ class CodeGraphEngine:
             pass
 
     def search_fts(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
-        """Fast BM25 keyword & identifier search across all indexed code chunks via SQLite FTS5 (zero heavy dependencies)"""
+        """Fast BM25 keyword & identifier search across all indexed code chunks via SQLite FTS5 and CJK matching"""
         if not self.load():
             return []
 
         conn = self._get_db()
-        # Clean query tokens for FTS5 syntax safety
+        results: List[Dict[str, Any]] = []
+        seen_ids = set()
+
+        # 1. 提取英数标识符分词执行 SQLite FTS5 BM25 检索
         clean_tokens = [re.sub(r'[^a-zA-Z0-9_]', '', t).strip() for t in query.split()]
         clean_tokens = [t for t in clean_tokens if t]
-        if not clean_tokens:
-            return []
-
-        fts_query = " OR ".join(f'"{t}"*' for t in clean_tokens)
-        try:
-            cursor = conn.execute(
-                """
-                SELECT 
-                    n.id, n.file_path, n.symbol_name, n.chunk_type, n.start_line, n.end_line,
-                    n.code, n.docstring, n.route_info, n.module_name, n.qualified_name,
-                    bm25(nodes_fts) AS rank
-                FROM nodes_fts f
-                JOIN nodes n ON f.rowid = n.rowid
-                WHERE nodes_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (fts_query, top_k),
-            )
-            rows = cursor.fetchall()
-            results = []
-            for r in rows:
-                code_lines = (r["code"] or "").splitlines()
-                preview = "\n".join(code_lines[:15]) + ("\n..." if len(code_lines) > 15 else "")
-                score = round(min(0.99, abs(float(r["rank"])) / (1.0 + abs(float(r["rank"])))), 4)
-                results.append(
-                    {
-                        "id": r["id"],
-                        "file_path": r["file_path"],
-                        "symbol_name": r["symbol_name"],
-                        "symbol_type": r["chunk_type"],
-                        "start_line": r["start_line"],
-                        "end_line": r["end_line"],
-                        "code": r["code"],
-                        "code_preview": preview,
-                        "docstring": r["docstring"] or "",
-                        "route_info": r["route_info"] or "",
-                        "score": score,
-                        "source": "sqlite_fts5",
-                    }
+        if clean_tokens:
+            fts_query = " OR ".join(f'"{t}"*' for t in clean_tokens)
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT 
+                        n.id, n.file_path, n.symbol_name, n.chunk_type, n.start_line, n.end_line,
+                        n.code, n.docstring, n.route_info, n.module_name, n.qualified_name,
+                        bm25(nodes_fts) AS rank
+                    FROM nodes_fts f
+                    JOIN nodes n ON f.rowid = n.rowid
+                    WHERE nodes_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (fts_query, top_k),
                 )
-            return results
-        except Exception:
-            return []
+                rows = cursor.fetchall()
+                for r in rows:
+                    cid = str(r["id"])
+                    if cid in seen_ids:
+                        continue
+                    seen_ids.add(cid)
+                    code_lines = (r["code"] or "").splitlines()
+                    preview = "\n".join(code_lines[:15]) + ("\n..." if len(code_lines) > 15 else "")
+                    score = round(min(0.99, abs(float(r["rank"])) / (1.0 + abs(float(r["rank"])))), 4)
+                    results.append(
+                        {
+                            "id": r["id"],
+                            "file_path": r["file_path"],
+                            "symbol_name": r["symbol_name"],
+                            "symbol_type": r["chunk_type"],
+                            "start_line": r["start_line"],
+                            "end_line": r["end_line"],
+                            "code": r["code"],
+                            "code_preview": preview,
+                            "docstring": r["docstring"] or "",
+                            "route_info": r["route_info"] or "",
+                            "score": score,
+                            "source": "sqlite_fts5",
+                        }
+                    )
+            except Exception:
+                pass
+
+        # 2. 提取中文字符串执行 SQLite 原生 LIKE 子串匹配 (解决 CJK 在 FTS5 unicode61 分词下的漏检)
+        cjk_tokens = re.findall(r"[\u4e00-\u9fff]{1,}", query)
+        if cjk_tokens:
+            try:
+                clauses = []
+                params = []
+                for tok in cjk_tokens[:4]:
+                    clauses.append("(n.code LIKE ? OR n.docstring LIKE ? OR n.symbol_name LIKE ?)")
+                    params.extend([f"%{tok}%", f"%{tok}%", f"%{tok}%"])
+                cjk_sql = f"""
+                    SELECT 
+                        n.id, n.file_path, n.symbol_name, n.chunk_type, n.start_line, n.end_line,
+                        n.code, n.docstring, n.route_info, n.module_name, n.qualified_name
+                    FROM nodes n
+                    WHERE {" OR ".join(clauses)}
+                    LIMIT ?
+                """
+                cjk_cursor = conn.execute(cjk_sql, (*params, top_k))
+                for r in cjk_cursor.fetchall():
+                    cid = str(r["id"])
+                    if cid in seen_ids:
+                        continue
+                    seen_ids.add(cid)
+                    code_lines = (r["code"] or "").splitlines()
+                    preview = "\n".join(code_lines[:15]) + ("\n..." if len(code_lines) > 15 else "")
+                    results.append(
+                        {
+                            "id": r["id"],
+                            "file_path": r["file_path"],
+                            "symbol_name": r["symbol_name"],
+                            "symbol_type": r["chunk_type"],
+                            "start_line": r["start_line"],
+                            "end_line": r["end_line"],
+                            "code": r["code"],
+                            "code_preview": preview,
+                            "docstring": r["docstring"] or "",
+                            "route_info": r["route_info"] or "",
+                            "score": 0.88,
+                            "source": "sqlite_cjk_match",
+                        }
+                    )
+            except Exception:
+                pass
+
+        return results
 
     def _sync_from_lancedb(self) -> bool:
         """从 LanceDB 表 code_chunks 流式读取并构建 SQLite 图谱索引"""
