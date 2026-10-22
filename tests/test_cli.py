@@ -59,7 +59,7 @@ def test_cli_all_subcommands():
     # 1b. Test --version
     code, out, err = run_cli_cmd(["--version"])
     assert code == 0, f"--version failed: {err}"
-    assert "0.8.4" in out or "Version" in out
+    assert "0.8.5" in out or "Version" in out
     print("✅ 1b. CLI --version test passed")
 
     # 2. Test index

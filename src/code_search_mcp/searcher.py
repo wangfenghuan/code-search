@@ -188,26 +188,48 @@ class CodeSearcher:
                 candidates_map[cid] = r
                 sparse_rank[cid] = s_idx
 
+        # 建议 2 极速预过滤 (Fast-Path Filter):
+        # 检查是否为具有明确代码标识符特征的查询 (如 verify_password, AuthService, login_api)
+        clean_q = query.strip()
+        is_identifier_pattern = bool(
+            re.match(r"^[a-zA-Z_][a-zA-Z0-9_.]*$", clean_q)
+            and ("_" in clean_q or any(c.isupper() for c in clean_q[1:]))
+        )
+        # 若 FTS5 预选通道置信度极高 (首个符号精确全字匹配，或 BM25 置信度 > 0.70)，
+        # 且包含标识符特征，直接跳过耗时约 130ms 的 ONNX Dense 稠密向量推理，将查询压缩到 1~5ms
+        skip_dense_vector = False
+        if fts_records and is_identifier_pattern:
+            top_rec = fts_records[0]
+            top_sym = (top_rec.get("symbol_name") or "").lower()
+            q_lower = clean_q.lower()
+            if top_sym == q_lower or top_sym.endswith(f".{q_lower}") or top_rec.get("score", 0) >= 0.70:
+                skip_dense_vector = True
+
         # ---------------------------------------------------------
         # 通道 2: LanceDB Dense 向量语义相似度检索 (Vector Dense Channel)
         # ---------------------------------------------------------
         table = None
         if is_vector_indexed:
-            # 1. 查询文本标识符自然语言展开 (强化 bge-small-zh 对长标识符的捕捉)
-            expanded_query = expand_query_with_splits(query)
-            query_vec = self.embedding_engine.embed_query(expanded_query)
+            try:
+                table = self._get_table()
+            except Exception:
+                table = None
 
-            table = self._get_table()
-            if query_vec and table is not None:
-                try:
-                    dense_records = table.search(query_vec).limit(candidate_limit).to_list()
-                    for r_idx, r in enumerate(dense_records):
-                        cid = str(r.get("id"))
-                        if cid not in candidates_map:
-                            candidates_map[cid] = r
-                        dense_rank[cid] = r_idx
-                except Exception:
-                    pass
+            if not skip_dense_vector:
+                # 1. 查询文本标识符自然语言展开 (强化 bge-small-zh 对长标识符的捕捉)
+                expanded_query = expand_query_with_splits(query)
+                query_vec = self.embedding_engine.embed_query(expanded_query)
+
+                if query_vec and table is not None:
+                    try:
+                        dense_records = table.search(query_vec).limit(candidate_limit).to_list()
+                        for r_idx, r in enumerate(dense_records):
+                            cid = str(r.get("id"))
+                            if cid not in candidates_map:
+                                candidates_map[cid] = r
+                            dense_rank[cid] = r_idx
+                    except Exception:
+                        pass
 
             # 若未建 FTS5 索引或未命中，回退到 LanceDB FTS / 词法过滤
             if not fts_records and table is not None:
