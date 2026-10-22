@@ -78,11 +78,20 @@ class CodeSearcher:
         self.repo_path = Path(repo_path).resolve()
         self.db_path = get_repo_db_path(self.repo_path)
         self._embedding_engine = None
+        self._graph_engine = None
         self.exact_engine = ExactSearchEngine(self.repo_path)
         # LanceDB connection cache
         self._lancedb_conn = None
         self._lancedb_table = None
         self._cached_mtime = 0.0
+
+    @property
+    def graph_engine(self):
+        """Lazy load CodeGraphEngine only when needed"""
+        if self._graph_engine is None:
+            from code_search_mcp.graph_engine import CodeGraphEngine
+            self._graph_engine = CodeGraphEngine.get_instance(self.repo_path)
+        return self._graph_engine
 
     @property
     def embedding_engine(self):
@@ -169,6 +178,20 @@ class CodeSearcher:
         dense_rank: Dict[str, int] = {}
         sparse_rank: Dict[str, int] = {}
 
+        # ---------------------------------------------------------
+        # 通道 1: SQLite FTS5 (BM25 词法与标识符极速预选通道 - ~0.3ms)
+        # ---------------------------------------------------------
+        fts_records = self.graph_engine.search_fts(query, top_k=candidate_limit)
+        if fts_records:
+            for s_idx, r in enumerate(fts_records):
+                cid = str(r.get("id"))
+                candidates_map[cid] = r
+                sparse_rank[cid] = s_idx
+
+        # ---------------------------------------------------------
+        # 通道 2: LanceDB Dense 向量语义相似度检索 (Vector Dense Channel)
+        # ---------------------------------------------------------
+        table = None
         if is_vector_indexed:
             # 1. 查询文本标识符自然语言展开 (强化 bge-small-zh 对长标识符的捕捉)
             expanded_query = expand_query_with_splits(query)
@@ -176,18 +199,18 @@ class CodeSearcher:
 
             table = self._get_table()
             if query_vec and table is not None:
-                # 通道 1: Dense 向量语义相似度检索 (Vector Dense Channel)
                 try:
                     dense_records = table.search(query_vec).limit(candidate_limit).to_list()
                     for r_idx, r in enumerate(dense_records):
                         cid = str(r.get("id"))
-                        candidates_map[cid] = r
+                        if cid not in candidates_map:
+                            candidates_map[cid] = r
                         dense_rank[cid] = r_idx
                 except Exception:
                     pass
 
-            if table is not None:
-                # 通道 2: LanceDB BM25 / 全文检索 (Sparse FTS Channel)
+            # 若未建 FTS5 索引或未命中，回退到 LanceDB FTS / 词法过滤
+            if not fts_records and table is not None:
                 try:
                     sparse_records = table.search(query, query_type="fts").limit(candidate_limit).to_list()
                     for s_idx, r in enumerate(sparse_records):
@@ -196,7 +219,6 @@ class CodeSearcher:
                             candidates_map[cid] = r
                         sparse_rank[cid] = s_idx
                 except Exception:
-                    # 降级：若未建 FTS 索引或异常，使用精确标识符 SQL 过滤作为词法召回
                     if all_query_tokens:
                         ident_clauses = " OR ".join(
                             [
@@ -213,39 +235,31 @@ class CodeSearcher:
                                 sparse_rank[cid] = s_idx
                         except Exception:
                             pass
-        else:
-            # 轻量模式: 使用 SQLite FTS5 (BM25 排序) 召回候选符号
-            fts_records = self.graph_engine.search_fts(query, top_k=candidate_limit)
-            if fts_records:
-                for s_idx, r in enumerate(fts_records):
-                    cid = str(r.get("id"))
-                    candidates_map[cid] = r
-                    sparse_rank[cid] = s_idx
-            else:
-                # 降级：若未匹配到 FTS，从 SQLite nodes 表模糊匹配候选符号
-                sqlite_path = self.db_path / "graph.sqlite3"
-                if sqlite_path.exists():
-                    try:
-                        import sqlite3
-                        conn = sqlite3.connect(str(sqlite_path))
-                        conn.row_factory = sqlite3.Row
-                        clauses = []
-                        params = []
-                        for tok in all_query_tokens[:5]:
-                            clauses.append("(symbol_name LIKE ? OR route_info LIKE ? OR code LIKE ?)")
-                            params.extend([f"%{tok}%", f"%{tok}%", f"%{tok}%"])
-                        where_clause = " OR ".join(clauses) if clauses else "1=1"
-                        sql = f"SELECT id, file_path, symbol_name, chunk_type, start_line, end_line, code, docstring, route_info, module_name, qualified_name FROM nodes WHERE {where_clause} LIMIT {candidate_limit}"
-                        rows = conn.execute(sql, params).fetchall()
-                        for s_idx, r in enumerate(rows):
-                            r_dict = dict(r)
-                            cid = str(r_dict.get("id"))
-                            if cid not in candidates_map:
-                                candidates_map[cid] = r_dict
-                            sparse_rank[cid] = s_idx
-                        conn.close()
-                    except Exception:
-                        pass
+        elif not fts_records:
+            # 轻量模式降级: 若未命中 FTS5，从 SQLite nodes 表模糊匹配候选符号
+            sqlite_path = self.db_path / "graph.sqlite3"
+            if sqlite_path.exists():
+                try:
+                    import sqlite3
+                    conn = sqlite3.connect(str(sqlite_path))
+                    conn.row_factory = sqlite3.Row
+                    clauses = []
+                    params = []
+                    for tok in all_query_tokens[:5]:
+                        clauses.append("(symbol_name LIKE ? OR route_info LIKE ? OR code LIKE ?)")
+                        params.extend([f"%{tok}%", f"%{tok}%", f"%{tok}%"])
+                    where_clause = " OR ".join(clauses) if clauses else "1=1"
+                    sql = f"SELECT id, file_path, symbol_name, chunk_type, start_line, end_line, code, docstring, route_info, module_name, qualified_name FROM nodes WHERE {where_clause} LIMIT {candidate_limit}"
+                    rows = conn.execute(sql, params).fetchall()
+                    for s_idx, r in enumerate(rows):
+                        r_dict = dict(r)
+                        cid = str(r_dict.get("id"))
+                        if cid not in candidates_map:
+                            candidates_map[cid] = r_dict
+                        sparse_rank[cid] = s_idx
+                    conn.close()
+                except Exception:
+                    pass
 
         # ---------------------------------------------------------
         # 通道 3: 内置 ripgrep 确切代码符号匹配 (Ripgrep Match Channel)

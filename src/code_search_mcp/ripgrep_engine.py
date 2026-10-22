@@ -102,6 +102,12 @@ class ExactSearchEngine:
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path.resolve()
         self.rg_path = find_system_ripgrep()
+        self._cache: Dict[Tuple[str, bool, bool, str, int], Dict[str, Any]] = {}
+        self._cache_max = 256
+
+    def clear_cache(self):
+        """Clear query cache on index update"""
+        self._cache.clear()
 
     def search(
         self,
@@ -112,6 +118,10 @@ class ExactSearchEngine:
         max_results: int = 20,
     ) -> Dict[str, Any]:
         """执行精准文本匹配"""
+        cache_key = (pattern, is_regex, case_sensitive, file_glob, max_results)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
         if self.rg_path:
             try:
                 results = self._search_with_ripgrep(
@@ -121,11 +131,15 @@ class ExactSearchEngine:
                     file_glob=file_glob,
                     max_results=max_results,
                 )
-                return {
+                res = {
                     "engine": "ripgrep (Rust SIMD accelerated)",
                     "pattern": pattern,
                     "matches": results,
                 }
+                if len(self._cache) >= self._cache_max:
+                    self._cache.pop(next(iter(self._cache)))
+                self._cache[cache_key] = res
+                return res
             except Exception as e:
                 sys.stderr.write(f"[code-search-graph] ripgrep execution error, falling back to built-in engine: {e}\n")
 
@@ -137,11 +151,15 @@ class ExactSearchEngine:
             file_glob=file_glob,
             max_results=max_results,
         )
-        return {
+        res = {
             "engine": "Built-in multi-threaded text engine",
             "pattern": pattern,
             "matches": results,
         }
+        if len(self._cache) >= self._cache_max:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[cache_key] = res
+        return res
 
     def _search_with_ripgrep(
         self,

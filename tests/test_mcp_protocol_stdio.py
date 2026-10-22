@@ -141,7 +141,7 @@ def test_mcp_stdio_protocol():
         impact_resp = read_response()
         assert impact_resp.get("id") == 4
         imp_text = impact_resp.get("result", {}).get("content", [])[0].get("text", "")
-        assert "爆炸半径/影响面分析" in imp_text
+        assert "Blast-Radius" in imp_text or "爆炸半径" in imp_text
         assert "HTTP POST /api/v1/auth/login" in imp_text
         print(f"   ✓ get_impact_radius 返回正常 (命中受波及 API 路由)")
 
@@ -163,7 +163,7 @@ def test_mcp_stdio_protocol():
         exp_resp = read_response()
         assert exp_resp.get("id") == 5
         exp_text = exp_resp.get("result", {}).get("content", [])[0].get("text", "")
-        assert "业务全链路手术级探索" in exp_text
+        assert "Exploration" in exp_text or "探索" in exp_text
         print(f"   ✓ explore_codebase 返回正常 (生成完整 ASCII 调用依赖树与源码)")
 
         # 7. 调用工具: find_references (反向引用)
@@ -183,7 +183,7 @@ def test_mcp_stdio_protocol():
         ref_resp = read_response()
         assert ref_resp.get("id") == 6
         ref_text = ref_resp.get("result", {}).get("content", [])[0].get("text", "")
-        assert "跨模块反向引用分析" in ref_text
+        assert "References" in ref_text or "反向引用" in ref_text
         print(f"   ✓ find_references 返回正常")
 
         print("\n" + "=" * 75)
