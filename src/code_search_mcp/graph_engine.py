@@ -78,6 +78,14 @@ class CodeGraphEngine:
                 PRIMARY KEY (query_type, symbol_name)
             );
 
+            CREATE TABLE IF NOT EXISTS graph_query_cache (
+                query_type TEXT,
+                cache_key TEXT,
+                result_json TEXT,
+                created_at REAL,
+                PRIMARY KEY (query_type, cache_key)
+            );
+
             CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY,
                 file_path TEXT,
@@ -148,8 +156,135 @@ class CodeGraphEngine:
             -- 复合覆盖索引：get_callees BFS 最常见访问模式 (caller_id = ? ORDER BY confidence DESC)
             CREATE INDEX IF NOT EXISTS idx_resolved_caller_id_conf
                 ON resolved_edges(caller_id, confidence DESC, resolution_type, callee_id);
+
+            -- FTS5 Full-Text Search Virtual Table across code chunks (zero RAM, high-performance BM25 ranking)
+            CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+                symbol_name,
+                qualified_name,
+                docstring,
+                code,
+                content='nodes',
+                content_rowid='rowid',
+                tokenize='unicode61'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
+                INSERT INTO nodes_fts(rowid, symbol_name, qualified_name, docstring, code)
+                VALUES (new.rowid, new.symbol_name, new.qualified_name, new.docstring, new.code);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
+                INSERT INTO nodes_fts(nodes_fts, rowid, symbol_name, qualified_name, docstring, code)
+                VALUES('delete', old.rowid, old.symbol_name, old.qualified_name, old.docstring, old.code);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
+                INSERT INTO nodes_fts(nodes_fts, rowid, symbol_name, qualified_name, docstring, code)
+                VALUES('delete', old.rowid, old.symbol_name, old.qualified_name, old.docstring, old.code);
+                INSERT INTO nodes_fts(rowid, symbol_name, qualified_name, docstring, code)
+                VALUES (new.rowid, new.symbol_name, new.qualified_name, new.docstring, new.code);
+            END;
         """)
+
+        try:
+            n_row = conn.execute("SELECT count(*) as c FROM nodes").fetchone()
+            if n_row and n_row["c"] > 0:
+                f_row = conn.execute("SELECT count(*) as c FROM nodes_fts").fetchone()
+                if f_row and f_row["c"] == 0:
+                    conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');")
+        except Exception:
+            pass
+
         conn.commit()
+
+    def _get_query_cache(self, query_type: str, cache_key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve pre-computed query results from SQLite cache (<5ms response)"""
+        try:
+            conn = self._get_db()
+            row = conn.execute(
+                "SELECT result_json FROM graph_query_cache WHERE query_type = ? AND cache_key = ?",
+                (query_type, cache_key),
+            ).fetchone()
+            if row and row["result_json"]:
+                return json.loads(row["result_json"])
+        except Exception:
+            pass
+        return None
+
+    def _set_query_cache(self, query_type: str, cache_key: str, data: Dict[str, Any]):
+        """Persist computed query results into SQLite cache"""
+        try:
+            conn = self._get_db()
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_query_cache (query_type, cache_key, result_json, created_at) VALUES (?, ?, ?, ?)",
+                (query_type, cache_key, json.dumps(data, ensure_ascii=False), time.time()),
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+    def _clear_query_cache(self):
+        """Invalidate query cache when codebase is indexed or modified"""
+        try:
+            conn = self._get_db()
+            conn.execute("DELETE FROM graph_query_cache;")
+            conn.commit()
+        except Exception:
+            pass
+
+    def search_fts(self, query: str, top_k: int = 10) -> List[Dict[str, Any]]:
+        """Fast BM25 keyword & identifier search across all indexed code chunks via SQLite FTS5 (zero heavy dependencies)"""
+        if not self.load():
+            return []
+
+        conn = self._get_db()
+        # Clean query tokens for FTS5 syntax safety
+        clean_tokens = [re.sub(r'[^a-zA-Z0-9_]', '', t).strip() for t in query.split()]
+        clean_tokens = [t for t in clean_tokens if t]
+        if not clean_tokens:
+            return []
+
+        fts_query = " OR ".join(f'"{t}"*' for t in clean_tokens)
+        try:
+            cursor = conn.execute(
+                """
+                SELECT 
+                    n.id, n.file_path, n.symbol_name, n.chunk_type, n.start_line, n.end_line,
+                    n.code, n.docstring, n.route_info, n.module_name, n.qualified_name,
+                    bm25(nodes_fts) AS rank
+                FROM nodes_fts f
+                JOIN nodes n ON f.rowid = n.rowid
+                WHERE nodes_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (fts_query, top_k),
+            )
+            rows = cursor.fetchall()
+            results = []
+            for r in rows:
+                code_lines = (r["code"] or "").splitlines()
+                preview = "\n".join(code_lines[:15]) + ("\n..." if len(code_lines) > 15 else "")
+                score = round(min(0.99, abs(float(r["rank"])) / (1.0 + abs(float(r["rank"])))), 4)
+                results.append(
+                    {
+                        "id": r["id"],
+                        "file_path": r["file_path"],
+                        "symbol_name": r["symbol_name"],
+                        "symbol_type": r["chunk_type"],
+                        "start_line": r["start_line"],
+                        "end_line": r["end_line"],
+                        "code": r["code"],
+                        "code_preview": preview,
+                        "docstring": r["docstring"] or "",
+                        "route_info": r["route_info"] or "",
+                        "score": score,
+                        "source": "sqlite_fts5",
+                    }
+                )
+            return results
+        except Exception:
+            return []
 
     def _sync_from_lancedb(self) -> bool:
         """从 LanceDB 表 code_chunks 流式读取并构建 SQLite 图谱索引"""
@@ -175,6 +310,7 @@ class CodeGraphEngine:
         conn.execute("DELETE FROM resolved_edges;")
         conn.execute("DELETE FROM calls;")
         conn.execute("DELETE FROM nodes;")
+        self._clear_query_cache()
         conn.commit()
 
     def stream_insert_chunks(self, chunks: Sequence[Any]):
@@ -270,6 +406,11 @@ class CodeGraphEngine:
     def finalize_graph(self):
         """流式构建全部完成后记录元数据并提交"""
         conn = self._get_db()
+        try:
+            conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');")
+        except Exception:
+            pass
+        self._clear_query_cache()
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (INDEX_SCHEMA_VERSION,))
         conn.commit()
 
@@ -283,6 +424,7 @@ class CodeGraphEngine:
         conn.execute("DELETE FROM resolved_edges;")
         conn.execute("DELETE FROM calls;")
         conn.execute("DELETE FROM nodes;")
+        self._clear_query_cache()
 
         batch_size = 500
         nodes_to_insert = []
@@ -396,6 +538,11 @@ class CodeGraphEngine:
         # 仅当显式提供了调用边（如全量带调用的单元测试）时执行全局遍历；全库轻量索引时跳过，依赖按需秒级解析
         if calls_to_insert:
             self._resolve_all_edges(conn)
+
+        try:
+            conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');")
+        except Exception:
+            pass
 
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', ?)", (INDEX_SCHEMA_VERSION,))
         conn.commit()
@@ -1306,6 +1453,11 @@ class CodeGraphEngine:
                 "callers": [],
             }
 
+        cache_key = f"{symbol_name}:{limit}:{offset}"
+        cached = self._get_query_cache("callers", cache_key)
+        if cached is not None:
+            return cached
+
         conn = self._get_db()
         # On-demand scanning and disambiguating upstream callers
         self._resolve_callers_on_demand(symbol_name)
@@ -1415,7 +1567,7 @@ class CodeGraphEngine:
         else:
             paged_callers = matched_callers[offset:] if offset else matched_callers
 
-        return {
+        res = {
             "status": "success",
             "target_symbol": symbol_name,
             "defined_in_repo": is_defined_in_repo,
@@ -1425,6 +1577,8 @@ class CodeGraphEngine:
             "has_more": (offset + len(paged_callers)) < total_count,
             "callers": paged_callers,
         }
+        self._set_query_cache("callers", cache_key, res)
+        return res
 
     def get_callees(self, symbol_name: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
         """查询指定符号直接调用的下游函数与模块 (What X calls)
@@ -1440,6 +1594,11 @@ class CodeGraphEngine:
                 "message": f"未找到代码库索引，请先对 {self.repo_path} 执行 index_codebase",
                 "callees": [],
             }
+
+        cache_key = f"{symbol_name}:{limit}:{offset}"
+        cached = self._get_query_cache("callees", cache_key)
+        if cached is not None:
+            return cached
 
         conn = self._get_db()
         # On-demand extracting function-body callees and establishing edges
@@ -1559,7 +1718,7 @@ class CodeGraphEngine:
         else:
             paged_callees = callees_detail[offset:] if offset else callees_detail
 
-        return {
+        res = {
             "status": "success",
             "target_symbol": symbol_name,
             "total_count": total_count,
@@ -1567,6 +1726,8 @@ class CodeGraphEngine:
             "has_more": (offset + len(paged_callees)) < total_count,
             "callees": paged_callees,
         }
+        self._set_query_cache("callees", cache_key, res)
+        return res
 
     def get_impact_radius(self, symbol_name: str, max_depth: int = 3) -> Dict[str, Any]:
         """影响面/爆炸半径分析 (Blast Radius):
@@ -1577,6 +1738,11 @@ class CodeGraphEngine:
                 "status": "error",
                 "message": f"未找到代码库索引，请先执行 index_codebase",
             }
+
+        cache_key = f"{symbol_name}:{max_depth}"
+        cached = self._get_query_cache("impact", cache_key)
+        if cached is not None:
+            return cached
 
         conn = self._get_db()
         visited_symbols: Set[str] = set()
@@ -1677,7 +1843,7 @@ class CodeGraphEngine:
                     if len(queue) < 100:
                         queue.append((c['symbol_name'], depth + 1, path + [c['symbol_name']], c['id']))
 
-        return {
+        res = {
             "status": "success",
             "target_symbol": symbol_name,
             "max_analyzed_depth": max_depth,
@@ -1687,6 +1853,8 @@ class CodeGraphEngine:
             "impacted_external_routes": impacted_routes,
             "impact_propagation_chain": impacted_tree,
         }
+        self._set_query_cache("impact", cache_key, res)
+        return res
 
     def build_call_tree(self, root_sym: str, max_depth: int = 3) -> Dict[str, Any]:
         """对指定根节点进行 BFS 下游展开，生成调用树与链路节点 (Fix #9)
@@ -1694,6 +1862,21 @@ class CodeGraphEngine:
         优化：批量 BFS (Batched Frontier SQL) — 每层只发起一次 SQL 查询，
         而非对每个节点分别调用 get_callees()，将 DB 往返从 O(N×depth) 降至 O(depth)。
         """
+        if not self.load():
+            return {
+                "symbol": root_sym,
+                "defined_in_repo": False,
+                "file_path": None,
+                "line": None,
+                "docstring": "",
+                "children": [],
+            }
+
+        cache_key = f"{root_sym}:{max_depth}"
+        cached = self._get_query_cache("call_tree", cache_key)
+        if cached is not None:
+            return cached
+
         tree_node: Dict[str, Any] = {
             "symbol": root_sym,
             "defined_in_repo": True,
@@ -1805,6 +1988,7 @@ class CodeGraphEngine:
 
             frontier = next_frontier
 
+        self._set_query_cache("call_tree", cache_key, tree_node)
         return tree_node
 
 

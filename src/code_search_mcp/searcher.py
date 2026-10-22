@@ -214,29 +214,38 @@ class CodeSearcher:
                         except Exception:
                             pass
         else:
-            # 轻量模式: 从 SQLite nodes 表检索候选符号
-            sqlite_path = self.db_path / "graph.sqlite3"
-            if sqlite_path.exists():
-                try:
-                    import sqlite3
-                    conn = sqlite3.connect(str(sqlite_path))
-                    conn.row_factory = sqlite3.Row
-                    clauses = []
-                    params = []
-                    for tok in all_query_tokens[:5]:
-                        clauses.append("(symbol_name LIKE ? OR route_info LIKE ? OR code LIKE ?)")
-                        params.extend([f"%{tok}%", f"%{tok}%", f"%{tok}%"])
-                    where_clause = " OR ".join(clauses) if clauses else "1=1"
-                    sql = f"SELECT id, file_path, symbol_name, chunk_type, start_line, end_line, code, docstring, route_info, module_name, qualified_name FROM nodes WHERE {where_clause} LIMIT {candidate_limit}"
-                    rows = conn.execute(sql, params).fetchall()
-                    for s_idx, r in enumerate(rows):
-                        r_dict = dict(r)
-                        cid = str(r_dict.get("id"))
-                        candidates_map[cid] = r_dict
-                        sparse_rank[cid] = s_idx
-                    conn.close()
-                except Exception:
-                    pass
+            # 轻量模式: 使用 SQLite FTS5 (BM25 排序) 召回候选符号
+            fts_records = self.graph_engine.search_fts(query, top_k=candidate_limit)
+            if fts_records:
+                for s_idx, r in enumerate(fts_records):
+                    cid = str(r.get("id"))
+                    candidates_map[cid] = r
+                    sparse_rank[cid] = s_idx
+            else:
+                # 降级：若未匹配到 FTS，从 SQLite nodes 表模糊匹配候选符号
+                sqlite_path = self.db_path / "graph.sqlite3"
+                if sqlite_path.exists():
+                    try:
+                        import sqlite3
+                        conn = sqlite3.connect(str(sqlite_path))
+                        conn.row_factory = sqlite3.Row
+                        clauses = []
+                        params = []
+                        for tok in all_query_tokens[:5]:
+                            clauses.append("(symbol_name LIKE ? OR route_info LIKE ? OR code LIKE ?)")
+                            params.extend([f"%{tok}%", f"%{tok}%", f"%{tok}%"])
+                        where_clause = " OR ".join(clauses) if clauses else "1=1"
+                        sql = f"SELECT id, file_path, symbol_name, chunk_type, start_line, end_line, code, docstring, route_info, module_name, qualified_name FROM nodes WHERE {where_clause} LIMIT {candidate_limit}"
+                        rows = conn.execute(sql, params).fetchall()
+                        for s_idx, r in enumerate(rows):
+                            r_dict = dict(r)
+                            cid = str(r_dict.get("id"))
+                            if cid not in candidates_map:
+                                candidates_map[cid] = r_dict
+                            sparse_rank[cid] = s_idx
+                        conn.close()
+                    except Exception:
+                        pass
 
         # ---------------------------------------------------------
         # 通道 3: 内置 ripgrep 确切代码符号匹配 (Ripgrep Match Channel)
@@ -267,17 +276,36 @@ class CodeSearcher:
                             matched_cid = cid
                             break
 
-                    # 若 ripgrep 命中但尚未在候选池中，从 LanceDB 范围补全该代码块
+                    # 若 ripgrep 命中但尚未在候选池中，从 LanceDB 或 SQLite 范围补全该代码块
                     if not matched_cid:
-                        try:
-                            safe_file = rel_file.replace("'", "''")
-                            where_sql = f"file_path = '{safe_file}' AND start_line <= {line_num} AND end_line >= {line_num}"
-                            pulled = table.search().where(where_sql).limit(1).to_list()
-                            if pulled:
-                                matched_cid = str(pulled[0].get("id"))
-                                candidates_map[matched_cid] = pulled[0]
-                        except Exception:
-                            pass
+                        if is_vector_indexed and table is not None:
+                            try:
+                                safe_file = rel_file.replace("'", "''")
+                                where_sql = f"file_path = '{safe_file}' AND start_line <= {line_num} AND end_line >= {line_num}"
+                                pulled = table.search().where(where_sql).limit(1).to_list()
+                                if pulled:
+                                    matched_cid = str(pulled[0].get("id"))
+                                    candidates_map[matched_cid] = pulled[0]
+                            except Exception:
+                                pass
+                        else:
+                            sqlite_path = self.db_path / "graph.sqlite3"
+                            if sqlite_path.exists():
+                                try:
+                                    import sqlite3
+                                    conn = sqlite3.connect(str(sqlite_path))
+                                    conn.row_factory = sqlite3.Row
+                                    row = conn.execute(
+                                        "SELECT id, file_path, symbol_name, chunk_type, start_line, end_line, code, docstring, route_info, module_name, qualified_name FROM nodes WHERE file_path = ? AND start_line <= ? AND end_line >= ? LIMIT 1",
+                                        (rel_file, line_num, line_num)
+                                    ).fetchone()
+                                    if row:
+                                        r_dict = dict(row)
+                                        matched_cid = str(r_dict.get("id"))
+                                        candidates_map[matched_cid] = r_dict
+                                    conn.close()
+                                except Exception:
+                                    pass
 
                     if matched_cid:
                         ripgrep_hits[matched_cid] += 1

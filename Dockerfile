@@ -30,7 +30,7 @@ RUN uv sync --frozen --no-dev
 COPY . .
 
 # 6. Pre-warm embedding model weights during build to eliminate runtime download delay
-RUN uv run python -c "from fastembed import TextEmbedding; print('[Docker Build] Pre-warming embedding model...'); TextEmbedding('BAAI/bge-small-zh-v1.5'); print('[Docker Build] Pre-warm complete!')"
+RUN uv run python -c "from fastembed import TextEmbedding; print('[Docker Build] Pre-warming embedding model...'); TextEmbedding('BAAI/bge-small-en-v1.5'); print('[Docker Build] Pre-warm complete!')"
 
 # 7. Volume mount points:
 # /workspace: Mount host repository (read-only)

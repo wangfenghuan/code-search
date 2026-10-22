@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -518,25 +519,57 @@ class CodeIndexer:
 
             return table
 
-        for idx, f in enumerate(files, 1):
+        thread_local = threading.local()
+
+        def _parse_worker(f: Path):
+            if not hasattr(thread_local, "chunker"):
+                thread_local.chunker = UniversalCodeChunker(self.repo_path)
             try:
-                file_chunks = chunker.parse_file(f)
-                if file_chunks:
-                    current_batch.extend(file_chunks)
-                    if len(current_batch) >= STREAM_BATCH_SIZE:
-                        total_chunks += len(current_batch)
-                        _flush_batch(current_batch)
-                        current_batch.clear()
-                        gc.collect()
+                return f, thread_local.chunker.parse_file(f)
             except Exception as e:
                 sys.stderr.write(f"[code-search-graph] Warning: Failed to parse file {f}: {e}\n")
-            finally:
-                if progress_callback is not None:
-                    try:
-                        rel = str(f.relative_to(self.repo_path)).replace("\\", "/")
-                    except Exception:
-                        rel = f.name
-                    progress_callback(idx, file_count, rel, total_chunks + len(current_batch))
+                return f, []
+
+        parse_workers = min(4, max(1, os.cpu_count() or 4))
+        if file_count > 4 and parse_workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=parse_workers) as executor:
+                for idx, (f, file_chunks) in enumerate(executor.map(_parse_worker, files), 1):
+                    if file_chunks:
+                        current_batch.extend(file_chunks)
+                        if len(current_batch) >= STREAM_BATCH_SIZE:
+                            total_chunks += len(current_batch)
+                            _flush_batch(current_batch)
+                            current_batch.clear()
+                            gc.collect()
+
+                    if progress_callback is not None:
+                        try:
+                            rel = str(f.relative_to(self.repo_path)).replace("\\", "/")
+                        except Exception:
+                            rel = f.name
+                        progress_callback(idx, file_count, rel, total_chunks + len(current_batch))
+        else:
+            for idx, f in enumerate(files, 1):
+                try:
+                    file_chunks = chunker.parse_file(f)
+                    if file_chunks:
+                        current_batch.extend(file_chunks)
+                        if len(current_batch) >= STREAM_BATCH_SIZE:
+                            total_chunks += len(current_batch)
+                            _flush_batch(current_batch)
+                            current_batch.clear()
+                            gc.collect()
+                except Exception as e:
+                    sys.stderr.write(f"[code-search-graph] Warning: Failed to parse file {f}: {e}\n")
+                finally:
+                    if progress_callback is not None:
+                        try:
+                            rel = str(f.relative_to(self.repo_path)).replace("\\", "/")
+                        except Exception:
+                            rel = f.name
+                        progress_callback(idx, file_count, rel, total_chunks + len(current_batch))
 
         if current_batch:
             total_chunks += len(current_batch)

@@ -3,7 +3,16 @@ import os
 from pathlib import Path
 
 # Default global configurations and path management
-DEFAULT_MODEL_NAME = os.getenv("CODE_SEARCH_MODEL", "BAAI/bge-small-zh-v1.5")
+def _resolve_default_model() -> str:
+    if "CODE_SEARCH_MODEL" in os.environ:
+        return os.environ["CODE_SEARCH_MODEL"]
+    bundled_en = Path(__file__).resolve().parent / "models" / "bge-small-en-v1.5"
+    if bundled_en.exists() and (bundled_en / "model_optimized.onnx").exists():
+        return "BAAI/bge-small-en-v1.5"
+    return "BAAI/bge-small-zh-v1.5"
+
+
+DEFAULT_MODEL_NAME = _resolve_default_model()
 MODEL_DIMENSIONS = {
     "BAAI/bge-small-zh-v1.5": 512,
     "BAAI/bge-small-en-v1.5": 384,

@@ -35,7 +35,7 @@ if sys.platform == "win32":
 console = Console(highlight=False, legacy_windows=False)
 err_console = Console(stderr=True, highlight=False, legacy_windows=False)
 
-VERSION = "0.8.2"
+VERSION = "0.8.3"
 
 LOGO_BANNER = r"""[bold bright_cyan]   ____ ___  ____  _____     ____  _____    _    ____   ____ _   _ 
   / ___/ _ \|  _ \| ____|   / ___|| ____|  / \  |  _ \ / ___| | | |
@@ -80,7 +80,8 @@ def print_version():
     table.add_row("⚡ Version", f"[bold bright_green]{VERSION}[/bold bright_green]")
     table.add_row("🐍 Python Runtime", f"{platform.python_version()} ({platform.platform()})")
     table.add_row("📦 Cache Directory", f"[dim]{get_cache_root()}[/dim]")
-    table.add_row("🧠 Default Model", "BAAI/bge-small-zh-v1.5 [dim](384 dim, ONNX)[/dim]")
+    from code_search_mcp.config import DEFAULT_MODEL_NAME, VECTOR_DIMENSION
+    table.add_row("🧠 Default Model", f"{DEFAULT_MODEL_NAME} [dim]({VECTOR_DIMENSION} dim, ONNX)[/dim]")
     table.add_row("🔍 Exact Search", "Ripgrep [dim](Embedded SIMD)[/dim]")
     table.add_row("🌐 GitHub Repo", "[cyan]https://github.com/wangfenghuan/code-search[/cyan]")
     table.add_row("📦 PyPI Package", "[cyan]https://pypi.org/project/code-search-graph/[/cyan]")

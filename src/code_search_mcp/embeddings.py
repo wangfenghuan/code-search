@@ -97,12 +97,30 @@ class EmbeddingEngine:
                 f"[code-search-graph] Loading embedding model: {self.model_name} [backend: {hw_desc}, threads: {threads}]\n"
             )
             sys.stderr.flush()
-            model = TextEmbedding(
-                model_name=self.model_name,
-                cache_dir=models_cache,
-                providers=providers,
-                threads=threads,
-            )
+            try:
+                model = TextEmbedding(
+                    model_name=self.model_name,
+                    cache_dir=models_cache,
+                    providers=providers,
+                    threads=threads,
+                )
+            except Exception as e:
+                fallback_bundled = get_bundled_model_dir("BAAI/bge-small-zh-v1.5")
+                if fallback_bundled:
+                    sys.stderr.write(
+                        f"[code-search-graph] Warning: Could not download {self.model_name} ({e}), falling back to bundled offline model: BAAI/bge-small-zh-v1.5\n"
+                    )
+                    sys.stderr.flush()
+                    self.model_name = "BAAI/bge-small-zh-v1.5"
+                    model = TextEmbedding(
+                        model_name="BAAI/bge-small-zh-v1.5",
+                        specific_model_path=str(fallback_bundled),
+                        local_files_only=True,
+                        providers=providers,
+                        threads=threads,
+                    )
+                else:
+                    raise
         sys.stderr.write(f"[code-search-graph] Model loaded successfully\n")
         sys.stderr.flush()
         return model
