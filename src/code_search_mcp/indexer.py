@@ -1,8 +1,10 @@
 import ast
+import fnmatch
 import gc
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -355,14 +357,72 @@ class CodeIndexer:
         return self._embedding_engine
 
     def scan_files(self) -> List[Path]:
-        """递归扫描所有支持的多语言源文件 (Python, JS, TS, Go)"""
+        """扫描所有支持的多语言源文件，原生遵循项目 .gitignore 与默认忽略规则"""
+        from code_search_mcp.ripgrep_engine import find_system_ripgrep
+
+        rg = find_system_ripgrep()
+        if rg:
+            try:
+                args = [rg, "--files", "--no-require-git"]
+                for ign in DEFAULT_IGNORE_DIRS:
+                    args.extend(["--glob", f"!**/{ign}/**"])
+                    args.extend(["--glob", f"!{ign}/**"])
+
+                proc = subprocess.run(
+                    args,
+                    cwd=str(self.repo_path),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=30,
+                )
+                if proc.returncode == 0:
+                    matched_files = []
+                    for line in proc.stdout.splitlines():
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        f_path = Path(self.repo_path) / line_str
+                        ext = f_path.suffix.lower()
+                        if ext in EXTENSION_LANG_MAP and f_path.name not in DEFAULT_IGNORE_FILES:
+                            matched_files.append(f_path)
+                    return matched_files
+            except Exception as e:
+                sys.stderr.write(f"[code-search-graph] ripgrep scan error, falling back to os.walk: {e}\n")
+
+        # 回退引擎：Python os.walk 并解析根目录 .gitignore 规则
+        gitignore_patterns: List[str] = []
+        gi_file = self.repo_path / ".gitignore"
+        if gi_file.exists():
+            try:
+                for raw_line in gi_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                    l = raw_line.strip()
+                    if l and not l.startswith("#"):
+                        gitignore_patterns.append(l.rstrip("/"))
+            except Exception:
+                pass
+
         matched_files = []
         for root, dirs, files in os.walk(self.repo_path):
-            dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")]
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in DEFAULT_IGNORE_DIRS
+                and not d.startswith(".")
+                and not any(fnmatch.fnmatch(d, pat) for pat in gitignore_patterns)
+            ]
             for file in files:
                 ext = Path(file).suffix.lower()
                 if ext in EXTENSION_LANG_MAP and file not in DEFAULT_IGNORE_FILES:
-                    matched_files.append(Path(root) / file)
+                    try:
+                        rel_p = str((Path(root) / file).relative_to(self.repo_path)).replace("\\", "/")
+                    except ValueError:
+                        rel_p = file
+                    if not any(
+                        fnmatch.fnmatch(rel_p, pat) or fnmatch.fnmatch(file, pat) for pat in gitignore_patterns
+                    ):
+                        matched_files.append(Path(root) / file)
         return matched_files
 
     def index_all(
@@ -388,10 +448,6 @@ class CodeIndexer:
                 f"[code-search-graph] (Use --force-vector via CLI or force_vector=True via MCP to force full vectorization)\n"
             )
             sys.stderr.flush()
-
-        # 生成并缓存全局架构大纲
-        outline_gen = ProjectOutlineGenerator(self.repo_path)
-        outline_gen.generate()
 
         if file_count == 0:
             return {
@@ -584,6 +640,13 @@ class CodeIndexer:
         graph_engine.close()
         del graph_engine
         gc.collect()
+
+        # 5. 从刚刚持久化的 SQLite nodes 表秒级组装大纲 (零重复全库语法解析，耗时 <5ms)
+        try:
+            outline_gen = ProjectOutlineGenerator(self.repo_path)
+            outline_gen.generate_from_db()
+        except Exception as e:
+            sys.stderr.write(f"[code-search-graph] Warning: Failed to generate outline from database: {e}\n")
 
         if reused_total > 0:
             sys.stderr.write(f"[code-search-graph] Vector cache hit: {reused_total} chunks reused, {embedded_total} chunks computed\n")

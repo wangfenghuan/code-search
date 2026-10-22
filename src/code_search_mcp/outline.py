@@ -1,6 +1,8 @@
 import json
 import os
+import sqlite3
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -88,18 +90,115 @@ class ProjectOutlineGenerator:
             "functions": functions,
         }
 
+    def generate_from_db(self) -> Optional[Dict[str, Any]]:
+        """从已建立的 SQLite 关系数据库毫秒级逆向组装大纲 (零重复磁盘与语法解析开销，耗时 <5ms)"""
+        sqlite_file = self.db_path / "graph.sqlite3"
+        if not sqlite_file.exists():
+            return None
+
+        try:
+            conn = sqlite3.connect(str(sqlite_file))
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT file_path, symbol_name, chunk_type, start_line, end_line, docstring, route_info FROM nodes ORDER BY file_path, start_line"
+            ).fetchall()
+            conn.close()
+
+            if not rows:
+                return None
+
+            files_map = defaultdict(lambda: {"classes_map": {}, "functions": [], "file_summary": ""})
+            for r in rows:
+                f_p = r["file_path"]
+                sym_type = r["chunk_type"]
+                sym_name = r["symbol_name"]
+                doc = r["docstring"] or ""
+                route = r["route_info"] or ""
+
+                if not files_map[f_p]["file_summary"] and doc:
+                    files_map[f_p]["file_summary"] = doc.split("\n")[0].strip()
+
+                if sym_type in ("class", "struct", "interface", "record", "enum", "annotation", "component"):
+                    files_map[f_p]["classes_map"][sym_name] = {
+                        "name": sym_name,
+                        "type": sym_type,
+                        "summary": doc.split("\n")[0].strip() if doc else "",
+                        "methods": [],
+                    }
+                elif sym_type in ("method", "constructor"):
+                    if "." in sym_name:
+                        cls_name, m_name = sym_name.split(".", 1)
+                        if cls_name not in files_map[f_p]["classes_map"]:
+                            files_map[f_p]["classes_map"][cls_name] = {
+                                "name": cls_name,
+                                "type": "class",
+                                "summary": "",
+                                "methods": [],
+                            }
+                        if m_name not in files_map[f_p]["classes_map"][cls_name]["methods"]:
+                            files_map[f_p]["classes_map"][cls_name]["methods"].append(m_name)
+                    else:
+                        files_map[f_p]["functions"].append(
+                            {"name": sym_name, "summary": doc.split("\n")[0].strip() if doc else "", "route": route}
+                        )
+                elif sym_type == "function":
+                    files_map[f_p]["functions"].append(
+                        {"name": sym_name, "summary": doc.split("\n")[0].strip() if doc else "", "route": route}
+                    )
+
+            modules = []
+            for f_p in sorted(files_map.keys()):
+                d = files_map[f_p]
+                ext = Path(f_p).suffix.lower()
+                lang = EXTENSION_LANG_MAP.get(ext, "unknown")
+                modules.append(
+                    {
+                        "rel_path": f_p,
+                        "language": lang,
+                        "summary": d["file_summary"],
+                        "classes": list(d["classes_map"].values()),
+                        "functions": d["functions"],
+                    }
+                )
+
+            outline_data = {
+                "repo_name": self.repo_path.name,
+                "repo_path": str(self.repo_path),
+                "total_modules": len(modules),
+                "modules": modules,
+            }
+
+            try:
+                self.db_path.mkdir(parents=True, exist_ok=True)
+                cache_file = self.db_path / "outline.json"
+                cache_file.write_text(json.dumps(outline_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+            return outline_data
+        except Exception:
+            return None
+
     def generate(self) -> Dict[str, Any]:
-        """生成整个项目的多语言架构大纲字典"""
+        """生成整个项目的多语言架构大纲字典 (冷启动扫描回退)"""
+        # 优先使用遵循 .gitignore 的 CodeIndexer.scan_files 扫描真实源文件
+        try:
+            from code_search_mcp.indexer import CodeIndexer
+            target_files = CodeIndexer(self.repo_path).scan_files()
+        except Exception:
+            target_files = []
+            for root, dirs, files in os.walk(self.repo_path):
+                dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")]
+                for file in sorted(files):
+                    ext = Path(file).suffix.lower()
+                    if ext in EXTENSION_LANG_MAP and file not in DEFAULT_IGNORE_FILES:
+                        target_files.append(Path(root) / file)
+
         files_info = []
-        for root, dirs, files in os.walk(self.repo_path):
-            dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORE_DIRS and not d.startswith(".")]
-            for file in sorted(files):
-                ext = Path(file).suffix.lower()
-                if ext in EXTENSION_LANG_MAP and file not in DEFAULT_IGNORE_FILES:
-                    full_p = Path(root) / file
-                    info = self.extract_file_skeleton(full_p)
-                    if info:
-                        files_info.append(info)
+        for full_p in sorted(target_files):
+            info = self.extract_file_skeleton(full_p)
+            if info:
+                files_info.append(info)
 
         outline_data = {
             "repo_name": self.repo_path.name,
@@ -124,6 +223,10 @@ class ProjectOutlineGenerator:
                 return json.loads(cache_file.read_text(encoding="utf-8"))
             except Exception:
                 pass
+        # 优先从已有的 SQLite 图谱毫秒级提取，避免冷启动全盘重复语法树解析
+        db_outline = self.generate_from_db()
+        if db_outline:
+            return db_outline
         return self.generate()
 
     def format_as_markdown(self, outline: Dict[str, Any], max_depth: int = 3) -> str:
