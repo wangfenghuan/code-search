@@ -7,12 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-import lancedb
-
 from code_search_mcp.config import INDEX_SCHEMA_VERSION, get_repo_db_path
 from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser
 from code_search_mcp.ripgrep_engine import ExactSearchEngine
-from code_search_mcp.searcher import CodeSearcher
 
 _engine_cache: Dict[str, "CodeGraphEngine"] = {}
 _cache_lock = threading.Lock()
@@ -157,6 +154,7 @@ class CodeGraphEngine:
     def _sync_from_lancedb(self) -> bool:
         """从 LanceDB 表 code_chunks 流式读取并构建 SQLite 图谱索引"""
         try:
+            import lancedb
             db = lancedb.connect(str(self.db_path))
             tbl = db.open_table("code_chunks")
         except Exception:
@@ -1855,6 +1853,7 @@ class CodeGraphEngine:
                 "message": f"Codebase index not found, please run index_codebase first",
             }
 
+        from code_search_mcp.searcher import CodeSearcher
         searcher = CodeSearcher(self.repo_path)
         # Expand initial candidate pool to cover multi-module flows
         matches = searcher.search(query=query, top_k=max(top_k * 2, 6))

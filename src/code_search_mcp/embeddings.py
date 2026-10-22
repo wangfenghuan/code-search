@@ -2,8 +2,6 @@ import os
 import sys
 from pathlib import Path
 from typing import Generator, Iterable, List, Optional, Sequence
-import numpy as np
-from fastembed import TextEmbedding
 
 from code_search_mcp.config import DEFAULT_MODEL_NAME, get_cache_root
 
@@ -61,7 +59,7 @@ class EmbeddingEngine:
 
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME):
         self.model_name = model_name
-        self._model: TextEmbedding | None = None
+        self._model = None
         self._current_provider: str = ""
 
     @classmethod
@@ -70,7 +68,9 @@ class EmbeddingEngine:
             cls._instance = cls(model_name=model_name)
         return cls._instance
 
-    def _init_model(self, providers: List[str]) -> TextEmbedding:
+    def _init_model(self, providers: List[str]):
+        from fastembed import TextEmbedding
+
         # Bounded threads to prevent high peak memory during inference
         threads = int(os.environ.get("EMBEDDING_THREADS", min(4, max(1, os.cpu_count() or 4))))
         hw_desc = providers[0].replace("ExecutionProvider", "")
@@ -108,7 +108,7 @@ class EmbeddingEngine:
         return model
 
     @property
-    def model(self) -> TextEmbedding:
+    def model(self):
         if self._model is None:
             providers = get_optimal_execution_providers()
             self._model = self._init_model(providers)

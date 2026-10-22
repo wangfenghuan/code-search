@@ -10,8 +10,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import lancedb
-
 from code_search_mcp.config import (
     DEFAULT_IGNORE_DIRS,
     DEFAULT_IGNORE_FILES,
@@ -21,10 +19,15 @@ from code_search_mcp.config import (
     get_repo_db_path,
     get_vector_dimension,
 )
-from code_search_mcp.embeddings import EmbeddingEngine
 from code_search_mcp.multilang_parser import EXTENSION_LANG_MAP, TreeSitterParser, get_module_name_from_path
 from code_search_mcp.outline import ProjectOutlineGenerator
 from code_search_mcp.text_utils import extract_natural_words_from_identifiers
+
+
+def _get_lancedb():
+    """Lazy load lancedb module only when connecting to LanceDB"""
+    import lancedb
+    return lancedb
 def _create_fts_index_safe(table, field_name: str = "enriched_text"):
     """安全创建全文检索 FTS 索引，优先使用 LanceDB 现代 FTS 配置 API，消除 DeprecatedWarning"""
     try:
@@ -340,7 +343,15 @@ class CodeIndexer:
     def __init__(self, repo_path: str | Path):
         self.repo_path = Path(repo_path).resolve()
         self.db_path = get_repo_db_path(self.repo_path)
-        self.embedding_engine = EmbeddingEngine.get_instance()
+        self._embedding_engine = None
+
+    @property
+    def embedding_engine(self):
+        """Lazy load EmbeddingEngine only when embedding is actually needed"""
+        if self._embedding_engine is None:
+            from code_search_mcp.embeddings import EmbeddingEngine
+            self._embedding_engine = EmbeddingEngine.get_instance()
+        return self._embedding_engine
 
     def scan_files(self) -> List[Path]:
         """递归扫描所有支持的多语言源文件 (Python, JS, TS, Go)"""
@@ -403,7 +414,7 @@ class CodeIndexer:
 
         if not skip_vector:
             try:
-                db_conn = lancedb.connect(str(self.db_path))
+                db_conn = _get_lancedb().connect(str(self.db_path))
                 resp = db_conn.list_tables() if hasattr(db_conn, "list_tables") else db_conn.table_names()
                 tables = resp.tables if hasattr(resp, "tables") else list(resp)
                 if "code_chunks" in tables:
@@ -426,7 +437,7 @@ class CodeIndexer:
             except Exception:
                 existing_vectors_map.clear()
 
-            db = lancedb.connect(str(self.db_path))
+            db = _get_lancedb().connect(str(self.db_path))
 
         # 3. 真流式批次持久化 (Streaming Batch Persistence，内存恒定极小，杜绝全局积攒)
         STREAM_BATCH_SIZE = 300
@@ -592,7 +603,7 @@ class CodeIndexer:
             return
         try:
             if tbl is None:
-                db = lancedb.connect(str(self.db_path))
+                db = _get_lancedb().connect(str(self.db_path))
                 tbl = db.open_table("code_chunks")
             total_chunks = len(tbl)
             arrow_tbl = tbl.to_arrow()
@@ -625,7 +636,7 @@ class CodeIndexer:
             return False
 
         try:
-            db = lancedb.connect(str(self.db_path))
+            db = _get_lancedb().connect(str(self.db_path))
             tbl = db.open_table("code_chunks")
             safe_rel_path = rel_path.replace("'", "''")
             # 同时支持单文件完全匹配与子目录前缀匹配，彻底消除目录重命名/删除孤儿数据
@@ -726,7 +737,7 @@ class CodeIndexer:
                 }
             )
 
-        db = lancedb.connect(str(self.db_path))
+        db = _get_lancedb().connect(str(self.db_path))
         tbl = db.open_table("code_chunks")
         tbl.add(data)
         # 增量刷新全文 FTS 索引 (消除 LanceDB 废弃警告)

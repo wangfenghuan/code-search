@@ -64,8 +64,8 @@ Documentation = "https://github.com/wangfenghuan/code-search#readme"
 Changelog = "https://github.com/wangfenghuan/code-search/releases"
 
 [project.scripts]
-code-search-graph = "code_search_mcp:main"
-code-search-mcp = "code_search_mcp:main"
+code-search-graph = "code_search_mcp.cli:main"
+code-search-mcp = "code_search_mcp.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

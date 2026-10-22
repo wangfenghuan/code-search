@@ -6,11 +6,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from code_search_mcp.indexer import CodeIndexer
-from code_search_mcp.outline import ProjectOutlineGenerator
-from code_search_mcp.ripgrep_engine import ExactSearchEngine
-from code_search_mcp.searcher import CodeSearcher, resolve_repo_path
-from code_search_mcp.server import run_server
+from code_search_mcp.config import resolve_repo_path
 from code_search_mcp.ui import (
     console,
     print_banner,
@@ -81,6 +77,8 @@ def main_callback(
     if ctx.invoked_subcommand is None:
         # If not running in an interactive terminal (e.g. piped stdio from Claude Desktop / Cursor), launch MCP server
         if not sys.stdin.isatty():
+            from code_search_mcp.server import run_server
+
             run_server()
         else:
             print_banner()
@@ -90,6 +88,8 @@ def main_callback(
 
 @app.command("serve", help="Start server with MCP stdio protocol")
 def serve_cmd():
+    from code_search_mcp.server import run_server
+
     run_server()
 
 
@@ -128,6 +128,8 @@ def index_cmd(
         print_error(f"Target path '{target}' does not exist or is not a directory")
         raise typer.Exit(code=1)
 
+    from code_search_mcp.indexer import CodeIndexer
+
     indexer = CodeIndexer(target)
     res, elapsed = run_indexing_with_progress(
         indexer,
@@ -158,6 +160,8 @@ def outline_cmd(
         raise typer.Exit(code=1)
 
     with console.status("[bold cyan]Extracting codebase architectural outline map...[/bold cyan]", spinner="dots"):
+        from code_search_mcp.outline import ProjectOutlineGenerator
+
         gen = ProjectOutlineGenerator(target)
         outline_data = gen.get_cached_or_generate()
     print_markdown(gen.format_as_markdown(outline_data))
@@ -194,9 +198,13 @@ def search_cmd(
         print_error("Target repository not found. Please run 'index' first.")
         raise typer.Exit(code=1)
 
+    from code_search_mcp.searcher import CodeSearcher
+
     searcher = CodeSearcher(target)
     if not searcher.is_indexed():
         console.print(f"[dim]Notice: Repository '{target.name}' is not yet indexed. Creating initial index...[/dim]")
+        from code_search_mcp.indexer import CodeIndexer
+
         indexer = CodeIndexer(target)
         run_indexing_with_progress(indexer)
 
@@ -248,6 +256,8 @@ def exact_cmd(
     if not target or not target.exists():
         print_error("Target repository not found")
         raise typer.Exit(code=1)
+
+    from code_search_mcp.ripgrep_engine import ExactSearchEngine
 
     engine = ExactSearchEngine(target)
     with console.status(f"[bold magenta]Searching via Ripgrep: {pattern}...[/bold magenta]", spinner="dots"):

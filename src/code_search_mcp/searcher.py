@@ -6,52 +6,19 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-import lancedb
-
 from code_search_mcp.config import (
     DEFAULT_MODEL_NAME,
     INDEX_SCHEMA_VERSION,
     get_db_dir,
     get_repo_db_path,
+    resolve_repo_path,
 )
-from code_search_mcp.embeddings import EmbeddingEngine
 from code_search_mcp.ripgrep_engine import ExactSearchEngine
 from code_search_mcp.text_utils import (
     expand_query_with_splits,
     extract_natural_words_from_identifiers,
     split_camel_snake_case,
 )
-
-
-def resolve_repo_path(repo_path: Optional[str] = None) -> Optional[Path]:
-    """解析代码库路径：若未指定则尝试推断当前目录或上次索引的项目"""
-    if repo_path and repo_path.strip():
-        p = Path(repo_path).resolve()
-        if p.exists() and p.is_dir():
-            return p
-
-    # 如果在 Docker 容器内运行且挂载了 /workspace，优先作为默认工作空间
-    docker_ws = Path("/workspace")
-    if docker_ws.exists() and docker_ws.is_dir():
-        try:
-            # 只要不是完全空的挂载点就优先使用
-            if any(docker_ws.iterdir()):
-                return docker_ws
-        except Exception:
-            pass
-
-    last_repo_file = get_db_dir() / "last_repo.txt"
-    if last_repo_file.exists():
-        try:
-            saved_path = last_repo_file.read_text(encoding="utf-8").strip()
-            p = Path(saved_path).resolve()
-            if p.exists() and p.is_dir():
-                return p
-        except Exception:
-            pass
-
-    cwd = Path.cwd().resolve()
-    return cwd
 
 
 def compute_ast_match_score(
@@ -110,15 +77,25 @@ class CodeSearcher:
     def __init__(self, repo_path: str | Path):
         self.repo_path = Path(repo_path).resolve()
         self.db_path = get_repo_db_path(self.repo_path)
-        self.embedding_engine = EmbeddingEngine.get_instance()
+        self._embedding_engine = None
         self.exact_engine = ExactSearchEngine(self.repo_path)
-        # LanceDB 连接缓存：避免每次 search() 都重复执行 connect()+open_table() 磁盘 I/O
+        # LanceDB connection cache
         self._lancedb_conn = None
         self._lancedb_table = None
         self._cached_mtime = 0.0
 
+    @property
+    def embedding_engine(self):
+        """Lazy load EmbeddingEngine only when embedding is actually needed"""
+        if self._embedding_engine is None:
+            from code_search_mcp.embeddings import EmbeddingEngine
+            self._embedding_engine = EmbeddingEngine.get_instance()
+        return self._embedding_engine
+
     def _get_table(self):
-        """懒加载并缓存 LanceDB 连接与表句柄（通过 meta.json mtime 自动感知增量更新）"""
+        """Lazy load and cache LanceDB table handle (aware of meta.json mtime)"""
+        import lancedb
+
         meta_file = self.db_path / "meta.json"
         curr_mtime = meta_file.stat().st_mtime if meta_file.exists() else 0.0
         if self._lancedb_conn is None or self._lancedb_table is None or self._cached_mtime != curr_mtime:

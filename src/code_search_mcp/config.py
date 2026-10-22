@@ -101,3 +101,33 @@ def get_repo_db_path(repo_path: str | Path) -> Path:
     path = get_db_dir() / repo_hash
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def resolve_repo_path(repo_path: str | Path | None = None) -> Path:
+    """Resolve repository path: validates provided path or falls back to /workspace, last_repo, or cwd"""
+    if repo_path:
+        p = Path(repo_path).resolve()
+        if p.exists() and p.is_dir():
+            return p
+
+    # Docker container mount priority
+    docker_ws = Path("/workspace")
+    if docker_ws.exists() and docker_ws.is_dir():
+        try:
+            if any(docker_ws.iterdir()):
+                return docker_ws
+        except Exception:
+            pass
+
+    last_repo_file = get_db_dir() / "last_repo.txt"
+    if last_repo_file.exists():
+        try:
+            saved_path = last_repo_file.read_text(encoding="utf-8").strip()
+            p = Path(saved_path).resolve()
+            if p.exists() and p.is_dir():
+                return p
+        except Exception:
+            pass
+
+    return Path.cwd().resolve()
+
