@@ -1,6 +1,6 @@
 """
-Studio-grade GIF demo generator for code-search-graph.
-Creates pixel-perfect, Retina-sharp animated terminal demonstration for README.md.
+Ultra-smooth cinematic demo GIF generator for code-search-graph.
+Features realistic keystroke typing, progressive output reveals, and crisp 60fps-feel pacing.
 """
 import io
 import json
@@ -149,7 +149,7 @@ def capture_scene_html(command: str, is_typing: bool, render_func=None) -> str:
     cursor_html = '<span class="cursor"></span>' if is_typing else ''
     output_html = ''
 
-    if not is_typing and render_func:
+    if render_func:
         output_buffer = io.StringIO()
         rec_console = Console(
             file=output_buffer,
@@ -201,8 +201,26 @@ def render_scene_to_image(html_content: str, temp_dir: Path, idx: int) -> Image.
     return img.copy()
 
 
+def add_typing_sequence(frames, durations, full_command: str, temp_dir: Path, step_chunks: list[str]):
+    """Add smooth, natural progressive typing frames"""
+    current_text = ""
+    for chunk in step_chunks:
+        current_text += chunk
+        h = capture_scene_html(current_text, is_typing=True)
+        frames.append(render_scene_to_image(h, temp_dir, len(frames)))
+        durations.append(110)
+
+    # Pause on full command before enter
+    durations[-1] = 220
+
+    # Brief enter press frame (cursor off)
+    h_enter = capture_scene_html(full_command, is_typing=False)
+    frames.append(render_scene_to_image(h_enter, temp_dir, len(frames)))
+    durations.append(140)
+
+
 def main():
-    print("🎬 Generating studio-grade demo GIF for code-search-graph README...")
+    print("🎬 Generating ultra-smooth cinematic demo GIF for code-search-graph README...")
     temp_dir = PROJECT_ROOT / "scripts" / "gif_frames"
     temp_dir.mkdir(parents=True, exist_ok=True)
     assets_dir = PROJECT_ROOT / "assets"
@@ -216,13 +234,10 @@ def main():
     # -------------------------------------------------------------
     print("  [1/5] Scene 1: code-search-graph --version")
     cmd1 = "code-search-graph --version"
-    h = capture_scene_html("code-search-graph --v", is_typing=True)
-    frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(250)
-
-    h = capture_scene_html(cmd1, is_typing=True)
-    frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(350)
+    add_typing_sequence(
+        frames, durations, cmd1, temp_dir,
+        ["code", "-search", "-graph", " --ver", "sion"]
+    )
 
     def r_version(con):
         ui.print_version()
@@ -232,19 +247,26 @@ def main():
     durations.append(2800)
 
     # -------------------------------------------------------------
-    # Scene 2: Indexing Repository (code-search-graph index)
+    # Scene 2: Streaming Micro-Batch Indexing (code-search-graph index)
     # -------------------------------------------------------------
     print("  [2/5] Scene 2: code-search-graph index tests/sample_project")
     cmd2 = "code-search-graph index tests/sample_project"
-    h = capture_scene_html("code-search-graph index tests/", is_typing=True)
-    frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(250)
+    add_typing_sequence(
+        frames, durations, cmd2, temp_dir,
+        ["code", "-search", "-graph", " index ", "tests/", "sample_project"]
+    )
 
-    h = capture_scene_html(cmd2, is_typing=True)
+    # Progressive execution step 1: Scanning
+    def r_idx_step1(con):
+        con.print(f"[bold cyan][code-search-graph][/bold cyan] Scanning repository: [dim]{SAMPLE_PROJECT}[/dim]")
+        con.print("[bold cyan][code-search-graph][/bold cyan] Discovered 8 source files")
+
+    h = capture_scene_html(cmd2, is_typing=False, render_func=r_idx_step1)
     frames.append(render_scene_to_image(h, temp_dir, len(frames)))
     durations.append(350)
 
-    def r_index(con):
+    # Progressive execution step 2: Streaming indexing & summary card
+    def r_idx_step2(con):
         con.print(f"[bold cyan][code-search-graph][/bold cyan] Scanning repository: [dim]{SAMPLE_PROJECT}[/dim]")
         con.print("[bold cyan][code-search-graph][/bold cyan] Discovered 8 source files")
         con.print("[bold cyan][code-search-graph][/bold cyan] Streaming micro-batch indexing (AST + LanceDB + SQLite)...")
@@ -255,44 +277,55 @@ def main():
         }
         ui.print_index_result(res_data, elapsed_seconds=0.18)
 
-    h = capture_scene_html(cmd2, is_typing=False, render_func=r_index)
+    h = capture_scene_html(cmd2, is_typing=False, render_func=r_idx_step2)
     frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(3000)
+    durations.append(3200)
 
     # -------------------------------------------------------------
-    # Scene 3: 4-Way Hybrid Search
+    # Scene 3: 4-Way Hybrid Search (code-search-graph search)
     # -------------------------------------------------------------
     print("  [3/5] Scene 3: code-search-graph search \"verify password\"")
     cmd3 = 'code-search-graph search "verify password"'
-    h = capture_scene_html('code-search-graph search "verify', is_typing=True)
-    frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(250)
+    add_typing_sequence(
+        frames, durations, cmd3, temp_dir,
+        ["code", "-search", "-graph", ' search ', '"verify ', 'password"']
+    )
 
-    h = capture_scene_html(cmd3, is_typing=True)
+    # Progressive execution step 1: Query header
+    def r_search_step1(con):
+        head_table = ui.Table.grid(expand=True)
+        head_table.add_column()
+        head_table.add_column(justify="right")
+        head_table.add_row(
+            f"🔍 [bold bright_cyan]Search Results[/bold bright_cyan]  •  Query: [bold bright_yellow]\"verify password\"[/bold bright_yellow]",
+            f"[dim]Target: [bold white]sample_project[/bold white]  •  Found: [bold cyan]2[/bold cyan] matches[/dim]",
+        )
+        con.print()
+        con.print(ui.Panel(head_table, border_style="cyan", box=ui.box.ROUNDED))
+
+    h = capture_scene_html(cmd3, is_typing=False, render_func=r_search_step1)
     frames.append(render_scene_to_image(h, temp_dir, len(frames)))
     durations.append(350)
 
-    def r_search(con):
+    # Progressive execution step 2: Full syntax cards
+    def r_search_step2(con):
         searcher = CodeSearcher(SAMPLE_PROJECT)
         results = searcher.search("verify password", top_k=2)
         ui.print_search_results(results, "verify password", SAMPLE_PROJECT, compact=True)
 
-    h = capture_scene_html(cmd3, is_typing=False, render_func=r_search)
+    h = capture_scene_html(cmd3, is_typing=False, render_func=r_search_step2)
     frames.append(render_scene_to_image(h, temp_dir, len(frames)))
     durations.append(3600)
 
     # -------------------------------------------------------------
-    # Scene 4: Blast-Radius Impact Analysis
+    # Scene 4: Blast-Radius Impact Analysis (code-search-graph impact)
     # -------------------------------------------------------------
     print("  [4/5] Scene 4: code-search-graph impact verify_password")
     cmd4 = "code-search-graph impact verify_password"
-    h = capture_scene_html("code-search-graph impact verify", is_typing=True)
-    frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(250)
-
-    h = capture_scene_html(cmd4, is_typing=True)
-    frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(350)
+    add_typing_sequence(
+        frames, durations, cmd4, temp_dir,
+        ["code", "-search", "-graph", " impact ", "verify", "_password"]
+    )
 
     def r_impact(con):
         engine = CodeGraphEngine.get_instance(SAMPLE_PROJECT)
@@ -304,17 +337,14 @@ def main():
     durations.append(3600)
 
     # -------------------------------------------------------------
-    # Scene 5: Architecture Outline Map
+    # Scene 5: Architecture Outline Map (code-search-graph outline)
     # -------------------------------------------------------------
     print("  [5/5] Scene 5: code-search-graph outline")
     cmd5 = "code-search-graph outline"
-    h = capture_scene_html("code-search-graph out", is_typing=True)
-    frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(250)
-
-    h = capture_scene_html(cmd5, is_typing=True)
-    frames.append(render_scene_to_image(h, temp_dir, len(frames)))
-    durations.append(350)
+    add_typing_sequence(
+        frames, durations, cmd5, temp_dir,
+        ["code", "-search", "-graph", " outline"]
+    )
 
     def r_outline(con):
         gen = ProjectOutlineGenerator(SAMPLE_PROJECT)
@@ -334,7 +364,7 @@ def main():
     # Compile & Optimize GIF
     # -------------------------------------------------------------
     output_gif = assets_dir / "demo.gif"
-    print(f"📦 Compiling {len(frames)} frames into animated GIF: {output_gif}...")
+    print(f"📦 Compiling {len(frames)} frames into ultra-smooth animated GIF: {output_gif}...")
 
     crop_box = (18, 10, 1306, 765)
     target_width = 960
@@ -344,7 +374,8 @@ def main():
     for f in frames:
         f_cropped = f.crop(crop_box)
         f_resized = f_cropped.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        p_frame = f_resized.convert("RGB").quantize(colors=256, method=Image.Resampling.LANCZOS)
+        # Quantize without dithering for vector-sharp terminal typography & zero background speckling
+        p_frame = f_resized.convert("RGB").quantize(colors=256, method=Image.Resampling.LANCZOS, dither=Image.Dither.NONE)
         processed_frames.append(p_frame)
 
     processed_frames[0].save(
@@ -357,7 +388,7 @@ def main():
     )
 
     size_kb = output_gif.stat().st_size / 1024
-    print(f"✨ Successfully generated demo GIF: {output_gif} ({size_kb:.1f} KB, {target_width}x{target_height})")
+    print(f"✨ Successfully generated ultra-smooth demo GIF: {output_gif} ({size_kb:.1f} KB, {len(frames)} frames, {target_width}x{target_height})")
 
 
 if __name__ == "__main__":
