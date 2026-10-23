@@ -385,6 +385,12 @@ def impact_cmd(
         "-d",
         help="Maximum traversal depth (default: 3)",
     ),
+    max_results: int = typer.Option(
+        50,
+        "--max-results",
+        "-m",
+        help="Maximum number of impacted symbols to track (default: 50, prevents BFS explosion)",
+    ),
 ):
     from code_search_mcp.graph_engine import CodeGraphEngine, format_impact_markdown
 
@@ -395,7 +401,7 @@ def impact_cmd(
 
     engine = CodeGraphEngine(target)
     with console.status(f"[bold cyan]Calculating blast radius for '{symbol}'...[/bold cyan]", spinner="dots"):
-        res = engine.get_impact_radius(symbol, max_depth=depth)
+        res = engine.get_impact_radius(symbol, max_depth=depth, max_results=max_results)
     print_markdown(format_impact_markdown(res))
 
 

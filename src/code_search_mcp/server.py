@@ -302,7 +302,7 @@ def get_symbol_callees(symbol_name: str, path: str = "", limit: int = 50, offset
 
 
 @mcp.tool()
-def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3) -> str:
+def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3, max_results: int = 50) -> str:
     """Change Impact Blast-Radius Analysis: Run before modifying or refactoring code.
     Traverses the call graph to determine which upstream modules, test cases, and exposed Web APIs will be impacted.
 
@@ -310,6 +310,7 @@ def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3) -> s
         symbol_name: Target symbol to modify (e.g. 'hash_password', 'processPayment')
         path: Repository root path (optional, defaults to current project)
         max_depth: Maximum propagation depth (default: 3)
+        max_results: Maximum number of impacted symbols to track (default: 50, prevents BFS explosion)
 
     Returns:
         Blast-radius assessment report with impacted symbols, files, API routes, and propagation tree
@@ -320,7 +321,7 @@ def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3) -> s
             return "Error: Could not resolve target repository path. Please provide 'path'."
 
         engine = CodeGraphEngine.get_instance(target_repo)
-        res = engine.get_impact_radius(symbol_name, max_depth=max_depth)
+        res = engine.get_impact_radius(symbol_name, max_depth=max_depth, max_results=max_results)
         return format_impact_markdown(res)
     except Exception as e:
         sys.stderr.write(f"[code-search-graph] get_impact_radius error: {e}\n")

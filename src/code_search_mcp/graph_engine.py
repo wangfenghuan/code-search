@@ -2,6 +2,7 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -1778,9 +1779,10 @@ class CodeGraphEngine:
         self._set_query_cache("callees", cache_key, res)
         return res
 
-    def get_impact_radius(self, symbol_name: str, max_depth: int = 3) -> Dict[str, Any]:
+    def get_impact_radius(self, symbol_name: str, max_depth: int = 3, max_results: int = 50) -> Dict[str, Any]:
         """影响面/爆炸半径分析 (Blast Radius):
         计算修改该符号后，直接和间接被波及的上游调用链路、关联文件及受影响的外部 API 路由
+        内置 max_results 上限防御机制，防止通用符号（如 run, get, init）引发 BFS 组合爆炸
         """
         if not self.load():
             return {
@@ -1788,7 +1790,7 @@ class CodeGraphEngine:
                 "message": f"未找到代码库索引，请先执行 index_codebase",
             }
 
-        cache_key = f"{symbol_name}:{max_depth}"
+        cache_key = f"{symbol_name}:{max_depth}:{max_results}"
         cached = self._get_query_cache("impact", cache_key)
         if cached is not None:
             return cached
@@ -1800,8 +1802,13 @@ class CodeGraphEngine:
         impacted_files: Set[str] = set()
         impacted_routes: List[Dict[str, str]] = []
         routes_seen: Set[str] = set()
+        truncated = False
 
         while queue:
+            if len(impacted_tree) >= max_results:
+                truncated = True
+                break
+
             curr_sym, depth, path, curr_id = queue.popleft()
             if curr_sym in visited_symbols or depth >= max_depth:
                 continue
@@ -1857,6 +1864,10 @@ class CodeGraphEngine:
                 callers = cursor.fetchall()
 
             for c in callers:
+                if len(impacted_tree) >= max_results:
+                    truncated = True
+                    break
+
                 # 忽略整文件虚块与纯文本块，仅追踪结构化实体
                 if c['chunk_type'] == 'file' or c['symbol_name'].startswith('['):
                     continue
@@ -1889,13 +1900,17 @@ class CodeGraphEngine:
                     )
 
                 if c['symbol_name'] not in visited_symbols and (depth + 1) < max_depth:
-                    if len(queue) < 100:
+                    if len(queue) < max_results:
                         queue.append((c['symbol_name'], depth + 1, path + [c['symbol_name']], c['id']))
+                    else:
+                        truncated = True
 
         res = {
             "status": "success",
             "target_symbol": symbol_name,
             "max_analyzed_depth": max_depth,
+            "max_results": max_results,
+            "truncated": truncated,
             "total_impacted_symbols": len(impacted_tree),
             "impacted_files_count": len(impacted_files),
             "impacted_files": sorted(list(impacted_files)),
@@ -2199,6 +2214,11 @@ class CodeGraphEngine:
                 "references": [],
             }
 
+        cache_key = query.strip()
+        cached = self._get_query_cache("references", cache_key)
+        if cached is not None:
+            return cached
+
         # 1. 结构化 AST 调用方
         callers_res = self.get_callers(query)
         ast_callers = callers_res.get("callers", [])
@@ -2224,7 +2244,7 @@ class CodeGraphEngine:
                     "content": content,
                 })
 
-        return {
+        res = {
             "status": "success",
             "target": query,
             "defined_in_repo": callers_res.get("defined_in_repo", False),
@@ -2234,6 +2254,8 @@ class CodeGraphEngine:
             "textual_references": text_refs,
             "total_references": len(ast_callers) + len(text_refs),
         }
+        self._set_query_cache("references", cache_key, res)
+        return res
 
 
 def format_callers_markdown(res: Dict[str, Any]) -> str:
@@ -2313,9 +2335,14 @@ def format_impact_markdown(res: Dict[str, Any]) -> str:
     files = res.get("impacted_files", [])
     routes = res.get("impacted_external_routes", [])
     chain = res.get("impact_propagation_chain", [])
+    truncated = res.get("truncated", False)
+    max_res = res.get("max_results", 50)
 
     lines = [f"# 💥 Change Impact Blast-Radius Analysis: `{target}`\n"]
     lines.append(f"> ⚠️ **Risk Assessment**: Modifying `{target}` could impact **{total_syms} upstream symbols**, **{len(files)} source files**, and **{len(routes)} external API routes**.\n")
+
+    if truncated:
+        lines.append(f"> 🛑 **Safety Cap Reached**: Result truncated at **{max_res}** impacted symbols to prevent BFS combinatorial explosion. Pass `--max-results <N>` / `-m <N>` to adjust threshold or `--depth <D>` to limit depth.\n")
 
     if routes:
         lines.append("## 🌐 Directly/Indirectly Affected External API Routes (Priority for regression testing):")

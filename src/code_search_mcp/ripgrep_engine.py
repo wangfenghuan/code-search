@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from code_search_mcp.config import DEFAULT_IGNORE_DIRS, DEFAULT_IGNORE_FILES
+from code_search_mcp.config import DEFAULT_IGNORE_DIRS, DEFAULT_IGNORE_FILES, get_repo_db_path
 
 
 @dataclass
@@ -102,12 +102,85 @@ class ExactSearchEngine:
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path.resolve()
         self.rg_path = find_system_ripgrep()
-        self._cache: Dict[Tuple[str, bool, bool, str, int], Dict[str, Any]] = {}
+        self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_max = 256
+        self.db_path = get_repo_db_path(self.repo_path)
+        self.sqlite_file = self.db_path / "graph.sqlite3"
+
+    def _get_sqlite_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """从持久化 SQLite 缓存中读取 (跨 CLI 进程常驻)"""
+        if not self.sqlite_file.exists():
+            return None
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(self.sqlite_file), timeout=2.0)
+            row = conn.execute(
+                "SELECT result_json FROM graph_query_cache WHERE query_type = 'exact' AND cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                data = json.loads(row[0])
+                matches = [MatchItem(**m) if isinstance(m, dict) else m for m in data.get("matches", [])]
+                return {
+                    "engine": data.get("engine", "ripgrep (SQLite persistent cache)"),
+                    "pattern": data.get("pattern", ""),
+                    "matches": matches,
+                    "cached": True,
+                }
+        except Exception:
+            pass
+        return None
+
+    def _set_sqlite_cache(self, cache_key: str, res: Dict[str, Any]):
+        """将检索结果持久化至 SQLite (跨 CLI 进程常驻)"""
+        try:
+            import sqlite3
+            import time
+
+            self.db_path.mkdir(parents=True, exist_ok=True)
+            matches_raw = [
+                m.__dict__ if hasattr(m, "__dict__") else m
+                for m in res.get("matches", [])
+            ]
+            serializable_data = {
+                "engine": res.get("engine", "ripgrep"),
+                "pattern": res.get("pattern", ""),
+                "matches": matches_raw,
+            }
+            conn = sqlite3.connect(str(self.sqlite_file), timeout=2.0)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS graph_query_cache (
+                    query_type TEXT,
+                    cache_key TEXT,
+                    result_json TEXT,
+                    created_at REAL,
+                    PRIMARY KEY (query_type, cache_key)
+                );
+                """
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_query_cache (query_type, cache_key, result_json, created_at) VALUES ('exact', ?, ?, ?)",
+                (cache_key, json.dumps(serializable_data, ensure_ascii=False), time.time()),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
     def clear_cache(self):
-        """Clear query cache on index update"""
+        """Clear query cache on index update (both memory and SQLite)"""
         self._cache.clear()
+        if self.sqlite_file.exists():
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(self.sqlite_file), timeout=2.0)
+                conn.execute("DELETE FROM graph_query_cache WHERE query_type = 'exact';")
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
 
     def search(
         self,
@@ -117,10 +190,17 @@ class ExactSearchEngine:
         file_glob: str = "",
         max_results: int = 20,
     ) -> Dict[str, Any]:
-        """执行精准文本匹配"""
-        cache_key = (pattern, is_regex, case_sensitive, file_glob, max_results)
+        """执行精准文本匹配 (L1 内存缓存 + L2 SQLite 持久化跨进程缓存)"""
+        cache_key = f"{pattern}:{int(is_regex)}:{int(case_sensitive)}:{file_glob}:{max_results}"
+        # L1 内存高速缓存
         if cache_key in self._cache:
             return self._cache[cache_key]
+
+        # L2 SQLite 跨进程持久化缓存
+        cached_sql = self._get_sqlite_cache(cache_key)
+        if cached_sql is not None:
+            self._cache[cache_key] = cached_sql
+            return cached_sql
 
         if self.rg_path:
             try:
@@ -139,6 +219,7 @@ class ExactSearchEngine:
                 if len(self._cache) >= self._cache_max:
                     self._cache.pop(next(iter(self._cache)))
                 self._cache[cache_key] = res
+                self._set_sqlite_cache(cache_key, res)
                 return res
             except Exception as e:
                 sys.stderr.write(f"[code-search-graph] ripgrep execution error, falling back to built-in engine: {e}\n")
@@ -159,6 +240,7 @@ class ExactSearchEngine:
         if len(self._cache) >= self._cache_max:
             self._cache.pop(next(iter(self._cache)))
         self._cache[cache_key] = res
+        self._set_sqlite_cache(cache_key, res)
         return res
 
     def _search_with_ripgrep(

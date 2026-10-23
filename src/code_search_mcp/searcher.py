@@ -119,6 +119,53 @@ class CodeSearcher:
         self._lancedb_table = None
         self._cached_mtime = 0.0
 
+    def _get_query_cache(self, query_type: str, cache_key: str) -> Optional[Any]:
+        """从 SQLite graph_query_cache 跨进程持久化缓存中读取 (<3ms 纯 sqlite3 读取，无 tree-sitter 开销)"""
+        sqlite_file = self.db_path / "graph.sqlite3"
+        if not sqlite_file.exists():
+            return None
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(sqlite_file), timeout=2.0)
+            row = conn.execute(
+                "SELECT result_json FROM graph_query_cache WHERE query_type = ? AND cache_key = ?",
+                (query_type, cache_key),
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                return json.loads(row[0])
+        except Exception:
+            pass
+        return None
+
+    def _set_query_cache(self, query_type: str, cache_key: str, data: Any):
+        """将检索结果持久化至 SQLite (跨 CLI 进程常驻)"""
+        sqlite_file = self.db_path / "graph.sqlite3"
+        try:
+            import sqlite3
+            import time
+            self.db_path.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(sqlite_file), timeout=2.0)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS graph_query_cache (
+                    query_type TEXT,
+                    cache_key TEXT,
+                    result_json TEXT,
+                    created_at REAL,
+                    PRIMARY KEY (query_type, cache_key)
+                );
+                """
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_query_cache (query_type, cache_key, result_json, created_at) VALUES (?, ?, ?, ?)",
+                (query_type, cache_key, json.dumps(data, ensure_ascii=False), time.time()),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+
     def is_indexed(self) -> bool:
         if not self.db_path.exists():
             return False
@@ -138,6 +185,11 @@ class CodeSearcher:
             if meta.get("model_name") != DEFAULT_MODEL_NAME:
                 self._invalidate_cache()
                 return False
+
+            lance_path = self.db_path / "code_chunks.lance"
+            if lance_path.exists():
+                return meta.get("indexed_chunks", 1) > 0
+
             tbl = self._get_table()
             return len(tbl) > 0
         except Exception:
@@ -155,6 +207,15 @@ class CodeSearcher:
         """
         if not self.is_indexed():
             return []
+
+        # 0. 跨进程 SQLite 持久化查询缓存 (毫秒级直出, < 3ms)
+        cache_key = f"{query.strip()}:{top_k}"
+        try:
+            cached = self._get_query_cache("search", cache_key)
+            if cached is not None and isinstance(cached, list):
+                return cached
+        except Exception:
+            pass
 
         meta_file = self.db_path / "meta.json"
         is_vector_indexed = True
@@ -428,7 +489,13 @@ class CodeSearcher:
             ),
             reverse=True,
         )
-        return scored_candidates[:top_k]
+        final_results = scored_candidates[:top_k]
+        if final_results:
+            try:
+                self._set_query_cache("search", cache_key, final_results)
+            except Exception:
+                pass
+        return final_results
 
 
 def format_search_results(results: List[Dict[str, Any]], query: str = "", compact: bool = True, full: bool = False) -> str:
