@@ -22,6 +22,11 @@
 [![Antigravity](https://img.shields.io/badge/Antigravity-supported-blueviolet.svg)](#supported-agents)
 [![Cline](https://img.shields.io/badge/Cline-supported-blueviolet.svg)](#supported-agents)
 [![M8ven Score](https://m8ven.ai/badge/mcp/wangfenghuan-code-search-1irys6?v=a08aa1ea0de046dbb1ae8554e6357ddd)](https://m8ven.ai/mcp/wangfenghuan-code-search-1irys6?s=readme)
+<br/>
+
+<p align="center">
+  <img src="assets/demo.gif" alt="code-search-graph Demo" width="850">
+</p>
 </div>
 
 ---

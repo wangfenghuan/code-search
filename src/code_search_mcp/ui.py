@@ -199,8 +199,8 @@ def print_search_results(
         rel_path = r.get("file_path", "")
         start_line = r.get("start_line", 1)
         end_line = r.get("end_line", start_line)
-        score = r.get("score", 0.0)
-        chunk_type = r.get("chunk_type", "code")
+        score = r.get("similarity") if r.get("similarity") is not None else r.get("score", 0.0)
+        chunk_type = r.get("chunk_type") or "symbol"
         symbol_name = r.get("symbol_name", "")
         code_text = r.get("code", "").strip()
 
