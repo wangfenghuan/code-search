@@ -31,15 +31,61 @@
 
 ---
 
+## ⚡ Quickstart (3 Steps, 60 Seconds)
+
+Get up and running in less than a minute:
+
+### 1️⃣ Install
+```bash
+pip install code-search-graph
+# or with uv
+uv tool install code-search-graph
+```
+
+### 2️⃣ Index your repository
+Navigate to any codebase directory and index it:
+```bash
+cd /path/to/your/project
+code-search-graph index .
+```
+> ⏱️ *Typically completes in 2–5 seconds. Repositories over 2,000 files automatically switch to instant lightweight mode.*
+
+### 3️⃣ Ask your AI Agent or explore via CLI
+
+- **Option A: One-click connect to your AI Agent (Recommended)**
+  ```bash
+  code-search-graph install
+  ```
+  *Automatically detects and configures **Claude Code**, **Cursor**, **Windsurf**, and **Cline** with MCP server settings and context rules.*
+
+  Now open Claude Code or Cursor and ask:
+  > *"How does the payment refund flow work in this codebase?"*
+
+  Your agent will automatically invoke `explore_codebase` to return surgical context in **1 shot with 0 blind file reads**.
+
+- **Option B: Instant CLI exploration**
+  ```bash
+  # Natural language hybrid search
+  code-search-graph search "user authentication and login"
+
+  # High-level architecture map (~500 tokens)
+  code-search-graph outline
+
+  # Upstream callers of a symbol
+  code-search-graph callers "verify_password"
+  ```
+
+---
+
 ## Contents / 目录
 
+- [⚡ Quickstart (60 Seconds)](#-quickstart-3-steps-60-seconds)
 - [Why code-search-graph?](#why-code-search-graph)
   - [Benchmark Results](#benchmark-results)
-- [Get Started](#get-started)
-  - [1. Install the CLI](#1-install-the-cli)
-  - [2. Wire up your agent(s)](#2-wire-up-your-agents)
-  - [3. Initialize each project](#3-initialize-each-project)
-  - [4. Always Fresh (Auto-Sync)](#4-always-fresh-auto-sync)
+- [Agent Integration Guide](#agent-integration-guide)
+  - [One-Click Auto Configuration](#1-one-click-auto-configuration)
+  - [Manual MCP Configuration](#2-manual-configuration-alternative)
+  - [Always Fresh (Auto-Sync)](#3-always-fresh-auto-sync)
 - [Key Features](#key-features)
   - [Surgical Exploration (`explore_codebase`)](#surgical-exploration-explore_codebase)
   - [Deterministic Call Graph & Blast Radius](#deterministic-call-graph--blast-radius)
@@ -47,11 +93,12 @@
   - [Architecture Outline Map](#architecture-outline-map)
   - [Bundled Cross-Platform ripgrep](#bundled-cross-platform-ripgrep)
   - [Streaming Micro-Batch Pipeline (< 160MB RAM)](#streaming-micro-batch-pipeline--160mb-ram)
-- [MCP Tools](#mcp-tools)
+- [MCP Tools Reference](#mcp-tools-reference)
 - [CLI Reference](#cli-reference)
 - [Supported Languages & Frameworks](#supported-languages--frameworks)
 - [Data & Privacy](#data--privacy)
 - [🇨🇳 中文说明](#-中文说明)
+  - [⚡ 极速上手（3 步 60 秒跑通）](#-极速上手3-步-60-秒跑通)
 
 ---
 
@@ -95,23 +142,11 @@ Tested across real-world open-source codebases, comparing an agent answering an 
 
 ---
 
-## Get Started
+## Agent Integration Guide
 
-### 1. Install the CLI
+### 1. One-Click Auto Configuration
 
-Install via `pip` or run instantly with `uvx`:
-
-```bash
-# Via pip
-pip install code-search-graph
-
-# Or run zero-install via uvx
-uvx code-search-graph install
-```
-
-### 2. Wire up your agent(s)
-
-Run the interactive installer. It automatically detects your installed AI coding agents and configures their MCP settings:
+Run the interactive installer. It automatically detects installed AI coding assistants and configures their MCP settings:
 
 ```bash
 code-search-graph install
@@ -126,7 +161,7 @@ The installer auto-configures:
 
 It also writes optimized `CLAUDE.md` and `.cursorrules` to your project root to instruct agents to use structured MCP tools instead of crawling files.
 
-#### Manual Configuration (Alternative)
+### 2. Manual Configuration (Alternative)
 
 If you prefer to configure manually:
 
@@ -147,19 +182,7 @@ claude mcp add code-search-graph -- uvx code-search-graph serve
 }
 ```
 
-### 3. Initialize each project
-
-In your project directory, run:
-
-```bash
-code-search-graph index .
-```
-
-- Repositories under 2,000 files build dense vector embeddings + SQLite call graph.
-- Repositories over 2,000 files automatically switch to lightweight mode (full graph, outline, and ripgrep exact search, skipping dense vectors to prevent OOM and long waits).
-- Use `--force-vector` if you want full vector embeddings on large repos, or `--skip-vector` for instant indexing.
-
-### 4. Always Fresh (Auto-Sync)
+### 3. Always Fresh (Auto-Sync)
 
 No manual re-syncing needed. `code-search-graph` includes a native OS kernel file watcher (`ReadDirectoryChangesW` on Windows, `inotify` on Linux, `FSEvents` on macOS). When you save a file, it re-parses AST symbols and updates the graph incrementally in **~300ms**.
 
@@ -202,20 +225,23 @@ Replaced global in-memory chunk accumulation with an $N=300$ micro-batch streami
 
 ---
 
-## MCP Tools
+## MCP Tools Reference
 
-| Tool Name | Arguments | Description |
-|---|---|---|
-| `explore_codebase` | `query`, `path?`, `top_k?` | **Surgical Exploration**: 1 tool call returns entry route, core code, upstream callers, downstream callees, and evidence. |
-| `get_impact_radius` | `symbol_name`, `path?`, `max_depth?` | **Blast Radius**: Calculates affected upstream symbols, files, and external web routes before refactoring. |
-| `get_symbol_callers` | `symbol_name`, `path?` | **Call Graph (Upstream)**: Finds who calls this function or class across the entire codebase. |
-| `get_symbol_callees` | `symbol_name`, `path?` | **Call Graph (Downstream)**: Finds dependencies called by this function. |
-| `get_codebase_outline` | `path?` | **Architecture Outline**: Multi-language skeleton map of modules and symbols (~500 tokens). |
-| `exact_search` | `pattern`, `path?`, `is_regex?`, `file_glob?` | **ripgrep Exact Match**: Fast literal/regex search for constants, error codes, config keys. |
-| `search_codebase` | `query`, `path?`, `top_k?`, `compact?` | **4-Way Hybrid Search**: Combines Dense Vector + BM25 + ripgrep + AST with RRF ranking. |
-| `get_file_content` | `path`, `start_line`, `end_line` | **File Slice Reader**: Read specific line ranges when detailed inspection is needed. |
-| `index_codebase` | `path`, `skip_vector?`, `force_vector?` | **Index Repository**: Parses AST, builds SQLite graph, and activates incremental file watcher. |
-| `get_watch_status` | `path?` | **Watcher Status**: Inspects file watcher health and recent sync events. |
+All tools are configured with standard MCP annotations (`readOnlyHint`, `destructiveHint`) and optimized English descriptions for AI tool selection:
+
+| Tool Name | Annotations | Arguments | Description |
+|---|---|---|---|
+| `explore_codebase` | `readOnly: true` | `query`, `path?`, `top_k?` | **Surgical Exploration**: Combines semantic search with call graph traversal to return entry routes, core implementations, and dependencies in one shot. |
+| `get_impact_radius` | `readOnly: true` | `symbol_name`, `path?`, `max_depth?` | **Blast Radius**: Traverses call graphs via BFS to reveal affected upstream symbols, files, and Web API routes before refactoring. |
+| `get_symbol_callers` | `readOnly: true` | `symbol_name`, `path?` | **Call Graph (Upstream)**: Finds all upstream functions, methods, and Web routes that call a specific symbol. |
+| `get_symbol_callees` | `readOnly: true` | `symbol_name`, `path?` | **Call Graph (Downstream)**: Finds all downstream functions and dependencies called by a specific symbol. |
+| `get_codebase_outline` | `readOnly: true` | `path?`, `max_depth?` | **Architecture Outline**: High-level architectural outline map of modules, classes, and key functions (~500 tokens). |
+| `exact_search` | `readOnly: true` | `pattern`, `path?`, `is_regex?`, `file_glob?` | **ripgrep Exact Match**: Fast literal/regex search for exact identifiers, config keys, error codes, and route strings. |
+| `search_codebase` | `readOnly: true` | `query`, `path?`, `top_k?`, `compact?` | **4-Way Hybrid Search**: Semantic hybrid code search using natural language (Vector + BM25 RRF). |
+| `get_file_content` | `readOnly: true` | `path`, `start_line?`, `end_line?` | **File Slice Reader**: Read specific line ranges with line numbers to conserve context tokens. |
+| `index_codebase` | `readOnly: false` | `path`, `skip_vector?`, `force_vector?` | **Index Repository**: Scans and indexes codebase to build AST call graphs and vector embeddings with auto-watcher. |
+| `find_references` | `readOnly: true` | `symbol_or_keyword`, `path?` | **Find References**: Aggregates AST structural callers with ripgrep textual references across configs and code. |
+| `get_watch_status` | `readOnly: true` | `path?` | **Watcher Status**: Checks status and sync history of the live background file watcher. |
 
 ---
 
@@ -264,6 +290,7 @@ code-search-graph clean --orphaned
 |---|---|---|---|
 | **Python** | Tree-sitter | Functions, Classes, Methods, Decorators, Docstrings, Calls | FastAPI, Flask |
 | **TypeScript / JavaScript** | Tree-sitter | Functions, Classes, Interfaces, Types, Arrow Functions, Calls | Express, NestJS |
+| **Vue (.vue SFC)** | Tree-sitter | `<template>` components, `<script>` TypeScript/JS symbols | Vue 2 / Vue 3 Composition & Options API |
 | **Go** | Tree-sitter | Functions, Structs, Methods, Interfaces, Calls | Gin, `net/http` |
 | **Java** | Tree-sitter | Classes, Interfaces, Methods, Constructors, DI Inferences | Spring Boot (`@GetMapping`, `@RestController`) |
 | **Rust** | Tree-sitter | Functions, Structs, Enums, Traits, Impl blocks, Calls | Actix-web, Axum |
@@ -278,6 +305,51 @@ code-search-graph clean --orphaned
 ---
 
 ## 🇨🇳 中文说明
+
+### ⚡ 极速上手（3 步 60 秒跑通）
+
+新用户安装后，只需按以下 3 步即可在 1 分钟内看到效果：
+
+#### 1️⃣ 安装 CLI
+```bash
+pip install code-search-graph
+# 或通过 uv 快速安装
+uv tool install code-search-graph
+```
+
+#### 2️⃣ 进入项目目录并建立索引
+```bash
+cd /path/to/your/project
+code-search-graph index .
+```
+> ⏱️ *中小型项目 2~5 秒即可完成建库；超 2,000 文件的超大仓库将自动采用极速轻量模式。*
+
+#### 3️⃣ 提问 AI Agent 或在终端即刻体验
+
+- **方式 A：一键接入 AI 编程助手（强烈推荐）**
+  ```bash
+  code-search-graph install
+  ```
+  *自动检测并配置 **Claude Code**、**Cursor**、**Windsurf**、**Cline** 的 MCP 环境与 prompt 规则。*
+  
+  随后在 Claude Code 或 Cursor 中直接提问：
+  > *“梳理一下用户登录认证与订单退款的核心链路”*
+  
+  Agent 将自动调用 `explore_codebase`，**1 次工具调用精准返回入口、核心实现与调用树，0 次盲目翻找文件！**
+
+- **方式 B：在终端直接感受强大检索能力**
+  ```bash
+  # 混合语义搜索（支持自然语言、驼峰分词与拼音意图）
+  code-search-graph search "用户登录认证流程"
+
+  # 查看全局架构大纲地图（极度节省 Token）
+  code-search-graph outline
+
+  # 追查函数被谁调用（上游调用图）
+  code-search-graph callers "verify_password"
+  ```
+
+---
 
 ### 为什么选择 code-search-graph？
 
@@ -294,23 +366,6 @@ code-search-graph clean --orphaned
 传统单向量 RAG (无代码图谱) [███████████████████                     ] 18,200 (47.2%)
 纯符号图谱 (无向量)          [█████                                   ] 4,800  (12.5%)
 code-search-graph             [█                                       ] 1,150  (3.0%, 节省 97%)
-```
-
-### 快速上手 (4 步搞定)
-
-```bash
-# 1. 安装 CLI (通过 pip 或免安装 uvx)
-pip install code-search-graph
-
-# 2. 自动配置 AI 客户端 (自动检测 Claude Code / Cursor / Windsurf 并写入 MCP 配置与规则)
-code-search-graph install
-# 或者使用别名
-code-search-graph install
-
-# 3. 索引项目 (大仓库自动进入免向量轻量模式，毫秒级就绪)
-code-search-graph index /path/to/project
-
-# 4. 无需手动同步！内置内核级文件监听器，保存代码 0.3 秒内增量更新
 ```
 
 ### 核心特性
@@ -335,4 +390,3 @@ code-search-graph index /path/to/project
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
-
