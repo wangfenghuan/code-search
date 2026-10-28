@@ -99,7 +99,19 @@ def test_mcp_stdio_protocol():
         ]
         for exp in expected_tools:
             assert exp in tool_names, f"缺少预期工具: {exp}"
-        print("   ✅ 11 项 MCP 核心工具定义全部规范暴露！")
+        # 验证每个工具的英文描述和 MCP annotations (readOnlyHint / destructiveHint)
+        for t in tools:
+            name = t["name"]
+            desc = t.get("description", "")
+            annotations = t.get("annotations", {})
+            assert desc, f"工具 {name} 缺少描述"
+            assert annotations is not None, f"工具 {name} 缺少 annotations"
+            assert annotations.get("destructiveHint") is False, f"工具 {name} destructiveHint 必须为 False"
+            if name == "index_codebase":
+                assert annotations.get("readOnlyHint") is False, "index_codebase readOnlyHint 必须为 False"
+            else:
+                assert annotations.get("readOnlyHint") is True, f"工具 {name} readOnlyHint 必须为 True"
+        print("   ✅ 11 项 MCP 核心工具定义、英文描述与标准 annotations 全部规范暴露！")
 
         # 4. 调用工具: search_codebase (向量检索)
         print("\n[3/6] JSON-RPC 调用: search_codebase...")

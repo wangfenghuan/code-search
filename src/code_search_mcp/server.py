@@ -10,6 +10,19 @@ try:
 except ImportError:
     from mcp.server.fastmcp import FastMCP
 
+try:
+    from mcp.types import ToolAnnotations
+except ImportError:
+    ToolAnnotations = None
+
+
+def make_annotations(read_only: bool, destructive: bool = False):
+    """Helper to construct MCP ToolAnnotations with readOnlyHint and destructiveHint."""
+    if ToolAnnotations is not None:
+        return ToolAnnotations(readOnlyHint=read_only, destructiveHint=destructive)
+    return None
+
+
 from code_search_mcp.graph_engine import (
     CodeGraphEngine,
     format_callers_markdown,
@@ -27,9 +40,12 @@ from code_search_mcp.watcher import get_or_create_watcher
 mcp = FastMCP("code-search-graph")
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Scan and index a multi-language codebase to build AST call graphs and vector embeddings. Use when initializing a new repository or manually refreshing the code index.",
+    annotations=make_annotations(read_only=False, destructive=False),
+)
 def index_codebase(path: str, skip_vector: bool = False, force_vector: bool = False) -> str:
-    """Scan and index a multi-language codebase at target path, generating call graph, architectural outline, and vector database with auto-activated live watcher.
+    """Scan and index a multi-language codebase to build AST call graphs and vector embeddings. Use when initializing a new repository or manually refreshing the code index.
 
     Args:
         path: Root directory path of the codebase (relative or absolute)
@@ -66,11 +82,12 @@ def index_codebase(path: str, skip_vector: bool = False, force_vector: bool = Fa
         return f"Failed to index codebase: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Get a high-level architectural outline map of modules, classes, and key functions. Call first in unfamiliar repositories to understand project structure without reading full files.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def get_codebase_outline(path: str = "", max_depth: int = 3) -> str:
-    """Get high-level architectural outline map of the codebase (token-efficient).
-    Displays core modules, file responsibilities, classes, and main functions.
-    Highly Recommended: Always invoke this tool first when starting a new task in an unfamiliar repository to understand project layout without blind grep searches.
+    """Get a high-level architectural outline map of modules, classes, and key functions. Call first in unfamiliar repositories to understand project structure without reading full files.
 
     Args:
         path: Root directory path of the repository (optional, defaults to current or most recently indexed repo)
@@ -92,15 +109,12 @@ def get_codebase_outline(path: str = "", max_depth: int = 3) -> str:
         return f"Failed to get codebase outline: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Semantic hybrid code search using natural language (Vector + BM25 RRF). Use when searching by intent, feature concepts, or business logic without knowing exact symbol names.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def search_codebase(query: str, path: str = "", top_k: int = 5, compact: bool = True) -> str:
-    """Semantic hybrid code search using natural language feature descriptions (Dense Vector + BM25 RRF fusion).
-
-    Best for:
-    - Searching by intent or business concepts (e.g. 'user login authentication flow', 'password hashing and salt', 'payment refund webhook');
-    - Discovering code when exact function or module names are unknown.
-
-    Boundary Note: If you already know the exact identifier name, config key (e.g. 'DATABASE_URL'), or error code, use `exact_search` instead.
+    """Semantic hybrid code search using natural language (Vector + BM25 RRF). Use when searching by intent, feature concepts, or business logic without knowing exact symbol names.
 
     Args:
         query: Natural language query describing desired functionality or feature
@@ -130,7 +144,10 @@ def search_codebase(query: str, path: str = "", top_k: int = 5, compact: bool = 
         return f"Code search failed: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Fast exact literal or regex search powered by embedded ripgrep. Use when you know exact identifiers, config keys, error codes, or route strings.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def exact_search(
     pattern: str,
     path: str = "",
@@ -139,14 +156,7 @@ def exact_search(
     file_glob: str = "",
     max_results: int = 20,
 ) -> str:
-    """Exact literal and regex search powered by embedded industrial ripgrep.
-
-    Best for:
-    - Searching exact identifiers (e.g. 'verify_password', 'SECRET_KEY', 'ERR_INVALID_TOKEN');
-    - Locating API URL route strings (e.g. '/api/v1/auth') across the whole repository;
-    - Multi-file regular expression searches with sub-second response times.
-
-    Boundary Note: If searching by fuzzy business intent without knowing symbol names, call `search_codebase` instead.
+    """Fast exact literal or regex search powered by embedded ripgrep. Use when you know exact identifiers, config keys, error codes, or route strings.
 
     Args:
         pattern: Target literal string or regex pattern (e.g. 'SECRET_KEY', 'ERR_AUTH_EXPIRED')
@@ -178,10 +188,12 @@ def exact_search(
         return f"Exact search failed: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Read specific line ranges or full content of a file with line numbers. Use to inspect targeted code snippets discovered by search_codebase or exact_search while conserving context tokens.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def get_file_content(path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
-    """Read contents of a specific file with optional line range and line numbers.
-    Used in combination with `search_codebase` compact mode to inspect full implementations on demand while saving tokens.
+    """Read specific line ranges or full content of a file with line numbers. Use to inspect targeted code snippets discovered by search_codebase or exact_search while conserving context tokens.
 
     Args:
         path: Relative or absolute path to the file
@@ -223,10 +235,12 @@ def get_file_content(path: str, start_line: Optional[int] = None, end_line: Opti
         return f"Failed to get file content: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Flagship single-call surgical exploration tool. Combines semantic search with call graph traversal to return entry routes, core implementations, and dependencies in one shot.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def explore_codebase(query: str, path: str = "", top_k: int = 2) -> str:
-    """Flagship exploration tool: single-call end-to-end surgical context.
-    Combines semantic search with AST call graphs to return entry points, core logic, callers, dependencies, and code evidence, avoiding repetitive grep/read rounds.
+    """Flagship single-call surgical exploration tool. Combines semantic search with call graph traversal to return entry routes, core implementations, and dependencies in one shot.
 
     Args:
         query: Feature workflow or architectural question (e.g. 'user login authentication and password verification', 'payment refund processing')
@@ -251,14 +265,18 @@ def explore_codebase(query: str, path: str = "", top_k: int = 2) -> str:
         return f"Codebase exploration failed: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Find all upstream functions, methods, and Web routes that call a specific symbol. Use to trace where and how a function is invoked across the codebase.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def get_symbol_callers(symbol_name: str, path: str = "", limit: int = 30, offset: int = 0) -> str:
-    """Find who calls a specific function or class across the codebase (Upstream Call Graph Tracking).
-    Returns calling symbols, files, line numbers, Web routes, and code snippets.
+    """Find all upstream functions, methods, and Web routes that call a specific symbol. Use to trace where and how a function is invoked across the codebase.
 
     Args:
         symbol_name: Target symbol name (e.g. 'verify_password' or 'AuthService.login')
         path: Repository root path (optional, defaults to current project)
+        limit: Maximum callers to return (default: 30)
+        offset: Offset for pagination (default: 0)
 
     Returns:
         Markdown report of upstream callers and code previews
@@ -276,14 +294,18 @@ def get_symbol_callers(symbol_name: str, path: str = "", limit: int = 30, offset
         return f"Failed to get symbol callers: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Find all downstream functions and dependencies called by a specific symbol. Use to inspect what a function invokes and identify in-repo vs external library calls.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def get_symbol_callees(symbol_name: str, path: str = "", limit: int = 50, offset: int = 0) -> str:
-    """Find downstream functions and methods directly called by a symbol (Downstream Dependency Tracking).
-    Identifies in-repo definitions versus external library dependencies.
+    """Find all downstream functions and dependencies called by a specific symbol. Use to inspect what a function invokes and identify in-repo vs external library calls.
 
     Args:
         symbol_name: Target symbol name (e.g. 'login_api' or 'OrderManager.CreateOrder')
         path: Repository root path (optional, defaults to current project)
+        limit: Maximum callees to return (default: 50)
+        offset: Offset for pagination (default: 0)
 
     Returns:
         Markdown report of downstream dependencies
@@ -301,10 +323,12 @@ def get_symbol_callees(symbol_name: str, path: str = "", limit: int = 50, offset
         return f"Failed to get symbol callees: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Change impact blast-radius analysis before refactoring or editing code. Traverses call graphs via BFS to reveal affected upstream symbols, files, and Web API routes.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3, max_results: int = 50) -> str:
-    """Change Impact Blast-Radius Analysis: Run before modifying or refactoring code.
-    Traverses the call graph to determine which upstream modules, test cases, and exposed Web APIs will be impacted.
+    """Change impact blast-radius analysis before refactoring or editing code. Traverses call graphs via BFS to reveal affected upstream symbols, files, and Web API routes.
 
     Args:
         symbol_name: Target symbol to modify (e.g. 'hash_password', 'processPayment')
@@ -328,10 +352,12 @@ def get_impact_radius(symbol_name: str, path: str = "", max_depth: int = 3, max_
         return f"Failed to analyze impact radius: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Find all references to a symbol or keyword across the codebase. Combines AST structural callers with ripgrep textual references in configs and strings.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def find_references(symbol_or_keyword: str, path: str = "") -> str:
-    """Cross-module reference analysis (Find All References).
-    Aggregates both AST structural callers and ripgrep exact textual/config references.
+    """Find all references to a symbol or keyword across the codebase. Combines AST structural callers with ripgrep textual references in configs and strings.
 
     Args:
         symbol_or_keyword: Target function name, method name, config key, error code, or literal
@@ -353,10 +379,12 @@ def find_references(symbol_or_keyword: str, path: str = "") -> str:
         return f"Failed to find references: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(
+    description="Check status and recent sync history of the live background file watcher. Use to verify if real-time auto-sync is active for your repository.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
 def get_watch_status(path: str = "") -> str:
-    """Get status and sync history of the live repository file watcher.
-    Monitors source files for changes and performs sub-second incremental indexing on save.
+    """Check status and recent sync history of the live background file watcher. Use to verify if real-time auto-sync is active for your repository.
 
     Args:
         path: Repository root path (optional, defaults to current project)
