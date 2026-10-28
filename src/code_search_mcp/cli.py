@@ -45,6 +45,7 @@ Common Examples:
   code-search-graph callers "verify_token"            # Find who calls a specific function or class
   code-search-graph callees "AuthService.login"       # Find downstream dependencies called by a function
   code-search-graph impact "User" --depth 3           # Blast-radius impact analysis (cross-file reverse propagation)
+  code-search-graph diff HEAD~1                       # Git diff blast-radius & AI code review context
   code-search-graph cache                             # View global index cache entries & disk usage
   code-search-graph clean --orphaned                  # Safely clean orphaned caches to free disk space
   code-search-graph install                           # One-click auto-config for Claude / Cursor / Windsurf MCP
@@ -403,6 +404,50 @@ def impact_cmd(
     with console.status(f"[bold cyan]Calculating blast radius for '{symbol}'...[/bold cyan]", spinner="dots"):
         res = engine.get_impact_radius(symbol, max_depth=depth, max_results=max_results)
     print_markdown(format_impact_markdown(res))
+
+
+@app.command("diff", help="Analyze git diff changes to calculate blast radius and affected Web routes/tests")
+@app.command("review", help="Alias for diff: review current changes and evaluate impact")
+def diff_cmd(
+    target: str = typer.Argument(
+        "HEAD",
+        help="Git ref or target commit/branch to diff against (default: HEAD, comparing working tree and staged changes)",
+    ),
+    positional_path: Optional[str] = typer.Argument(
+        None,
+        metavar="[PATH]",
+        help="Target repository path (positional argument, equivalent to --path)",
+    ),
+    path: Optional[str] = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Target repository path",
+    ),
+    depth: int = typer.Option(
+        3,
+        "--depth",
+        "-d",
+        help="Maximum traversal depth (default: 3)",
+    ),
+    max_results: int = typer.Option(
+        50,
+        "--max-results",
+        "-m",
+        help="Maximum number of impacted symbols to track (default: 50, prevents BFS explosion)",
+    ),
+):
+    from code_search_mcp.graph_engine import CodeGraphEngine, format_diff_context_markdown
+
+    target_repo = resolve_repo_path(path or positional_path or "")
+    if not target_repo or not target_repo.exists():
+        print_error("Target repository not found")
+        raise typer.Exit(code=1)
+
+    engine = CodeGraphEngine(target_repo)
+    with console.status(f"[bold cyan]Analyzing git diff against '{target}'...[/bold cyan]", spinner="dots"):
+        res = engine.get_diff_context(target=target, max_depth=depth, max_results=max_results)
+    print_markdown(format_diff_context_markdown(res))
 
 
 @app.command("watch", help="Start live hot-reloading repository file watcher")

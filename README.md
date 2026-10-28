@@ -241,6 +241,7 @@ All tools are configured with standard MCP annotations (`readOnlyHint`, `destruc
 | `get_file_content` | `readOnly: true` | `path`, `start_line?`, `end_line?` | **File Slice Reader**: Read specific line ranges with line numbers to conserve context tokens. |
 | `index_codebase` | `readOnly: false` | `path`, `skip_vector?`, `force_vector?` | **Index Repository**: Scans and indexes codebase to build AST call graphs and vector embeddings with auto-watcher. |
 | `find_references` | `readOnly: true` | `symbol_or_keyword`, `path?` | **Find References**: Aggregates AST structural callers with ripgrep textual references across configs and code. |
+| `get_diff_context` | `readOnly: true` | `target?`, `path?`, `max_depth?` | **Git Diff Review**: Analyzes git diff to calculate blast radius, affected Web routes, and recommended tests before PR merge. |
 | `get_watch_status` | `readOnly: true` | `path?` | **Watcher Status**: Checks status and sync history of the live background file watcher. |
 
 ---
@@ -264,6 +265,10 @@ code-search-graph callees "AuthService.login" -p /path/to/project
 
 # 4. Blast radius analysis
 code-search-graph impact "User" --depth 3 -p /path/to/project
+
+# 5. Git Diff blast radius & code review context
+code-search-graph diff HEAD~1 -p /path/to/project
+code-search-graph review -p /path/to/project
 
 # 5. Architecture outline
 code-search-graph outline -p /path/to/project

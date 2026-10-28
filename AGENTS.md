@@ -146,6 +146,6 @@ When an AI agent is working inside any project that has `code-search-graph` conf
 
 1. **Understand Project Layout**: Call `get_codebase_outline()` first. Never run blind `glob` or recursive directory listings.
 2. **Feature & Workflow Exploration**: Call `explore_codebase(query=...)` once. It aggregates the entry route, core implementation, and downstream call tree in a single round-trip.
-3. **Refactoring & Modifying Code**: **Always call `get_impact_radius(symbol_name=...)` before editing** important functions or classes. It reveals all upstream callers and exposed HTTP routes to protect against regressions.
+3. **Refactoring & Modifying Code**: **Always call `get_impact_radius(symbol_name=...)` before editing** important functions or classes, or **call `get_diff_context()` during PR code review** to inspect current changes. It reveals affected upstream callers, exposed HTTP routes, and recommended unit tests to protect against regressions.
 4. **Exact Identifiers & Constants**: Use `exact_search(pattern=...)` for sub-second ripgrep lookups of exact symbols, config keys, or error codes.
 5. **Reading Code**: Avoid reading entire large files. Use `get_file_content(path, start_line, end_line)` to inspect only the required lines.

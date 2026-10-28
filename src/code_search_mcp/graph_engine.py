@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 from collections import defaultdict, deque
@@ -14,6 +15,32 @@ from code_search_mcp.ripgrep_engine import ExactSearchEngine
 
 _engine_cache: Dict[str, "CodeGraphEngine"] = {}
 _cache_lock = threading.Lock()
+
+
+def is_test_node(file_path: str, symbol_name: str) -> bool:
+    """Helper to detect whether a file or symbol is a test case or test suite."""
+    f = (file_path or "").lower().replace("\\", "/")
+    s = (symbol_name or "").lower()
+
+    if any(p in f for p in ["/test/", "/tests/", "test/", "tests/"]):
+        return True
+
+    if (
+        f.endswith("_test.py")
+        or f.endswith(".spec.ts")
+        or f.endswith(".test.ts")
+        or f.endswith(".spec.js")
+        or f.endswith(".test.js")
+        or f.endswith("_test.go")
+        or f.endswith("test.java")
+        or f.endswith("tests.java")
+    ):
+        return True
+
+    if s.startswith("test_") or s.startswith("test") or s.endswith("test") or s.endswith("tests"):
+        return True
+
+    return False
 
 
 @dataclass
@@ -1905,6 +1932,21 @@ class CodeGraphEngine:
                     else:
                         truncated = True
 
+        affected_tests = []
+        tests_seen: Set[str] = set()
+        for item in impacted_tree:
+            f_p = item.get("file_path", "")
+            s_n = item.get("symbol", "")
+            if is_test_node(f_p, s_n):
+                t_key = f"{f_p}:{s_n}"
+                if t_key not in tests_seen:
+                    tests_seen.add(t_key)
+                    affected_tests.append({
+                        "symbol": s_n,
+                        "file_path": f_p,
+                        "line": item.get("line", 1),
+                    })
+
         res = {
             "status": "success",
             "target_symbol": symbol_name,
@@ -1915,6 +1957,7 @@ class CodeGraphEngine:
             "impacted_files_count": len(impacted_files),
             "impacted_files": sorted(list(impacted_files)),
             "impacted_external_routes": impacted_routes,
+            "affected_tests": affected_tests,
             "impact_propagation_chain": impacted_tree,
         }
         self._set_query_cache("impact", cache_key, res)
@@ -2257,6 +2300,193 @@ class CodeGraphEngine:
         self._set_query_cache("references", cache_key, res)
         return res
 
+    def get_diff_context(self, target: str = "HEAD", max_depth: int = 3, max_results: int = 50) -> Dict[str, Any]:
+        """Git Diff 变更影响面分析 (Diff Impact Analysis & Code Review Context)
+        结合 git diff 与代码图谱，自动定位修改的函数/类，计算向上波及的 Web 路由与关联单元测试
+        """
+        if not self.load():
+            return {
+                "status": "error",
+                "message": "未找到代码库索引，请先执行 index_codebase",
+            }
+
+        target_ref = target.strip() if target else "HEAD"
+        cmd = ["git", "diff", "-U0"]
+        if target_ref:
+            cmd.append(target_ref)
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(self.repo_path),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+            )
+            diff_text = proc.stdout
+            if proc.returncode != 0:
+                # If target_ref failed (e.g. initial repo without HEAD or uncommitted changes), fallback to git diff -U0
+                proc_fallback = subprocess.run(
+                    ["git", "diff", "-U0"],
+                    cwd=str(self.repo_path),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=20,
+                )
+                if proc_fallback.returncode == 0:
+                    diff_text = proc_fallback.stdout
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"Git diff execution failed: {proc.stderr or proc_fallback.stderr}",
+                    }
+        except FileNotFoundError:
+            return {
+                "status": "error",
+                "message": "git executable not found on system PATH.",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to execute git diff: {str(e)}",
+            }
+
+        if not diff_text.strip():
+            return {
+                "status": "success",
+                "target": target_ref,
+                "changed_files_count": 0,
+                "changed_files": [],
+                "modified_symbols": [],
+                "total_impacted_symbols": 0,
+                "impacted_files": [],
+                "impacted_routes": [],
+                "affected_tests": [],
+                "per_symbol_impact": {},
+                "message": f"No code changes detected against '{target_ref}'. Working tree is clean.",
+            }
+
+        changed_files: Dict[str, Set[int]] = {}
+        curr_file = None
+        for line in diff_text.splitlines():
+            if line.startswith("+++ b/"):
+                curr_file = line[6:].strip().replace("\\", "/")
+                if curr_file not in changed_files:
+                    changed_files[curr_file] = set()
+            elif line.startswith("@@ ") and curr_file:
+                m = re.search(r"\+([0-9]+)(?:,([0-9]+))?", line)
+                if m:
+                    start = int(m.group(1))
+                    cnt = int(m.group(2)) if m.group(2) is not None else 1
+                    if cnt == 0:
+                        changed_files[curr_file].add(start)
+                    else:
+                        for l in range(start, start + cnt):
+                            changed_files[curr_file].add(l)
+
+        git_root = self.repo_path
+        try:
+            p_top = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=str(self.repo_path),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            if p_top.returncode == 0 and p_top.stdout.strip():
+                git_root = Path(p_top.stdout.strip()).resolve()
+        except Exception:
+            pass
+
+        conn = self._get_db()
+        modified_symbols: List[Dict[str, Any]] = []
+        sym_names_set: Set[str] = set()
+
+        for raw_path, mod_lines in changed_files.items():
+            if not mod_lines:
+                continue
+
+            abs_p = (git_root / raw_path).resolve()
+            try:
+                rel_p = abs_p.relative_to(self.repo_path).as_posix()
+            except ValueError:
+                rel_p = raw_path
+
+            rows = conn.execute(
+                "SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, route_info, qualified_name "
+                "FROM nodes WHERE file_path = ? OR file_path = ? OR file_path LIKE ? OR file_path LIKE ?",
+                (rel_p, raw_path, f"%/{rel_p}", f"%\\{rel_p}")
+            ).fetchall()
+
+            for r in rows:
+                if r["chunk_type"] == "file":
+                    continue
+                s_line = r["start_line"]
+                e_line = r["end_line"]
+                if any(s_line <= l <= e_line for l in mod_lines):
+                    sym = r["symbol_name"]
+                    if sym not in sym_names_set:
+                        sym_names_set.add(sym)
+                        modified_symbols.append({
+                            "symbol": sym,
+                            "type": r["chunk_type"],
+                            "file_path": r["file_path"],
+                            "start_line": s_line,
+                            "end_line": e_line,
+                            "route_info": r["route_info"] or "",
+                            "qualified_name": r["qualified_name"] or sym,
+                        })
+
+        all_routes: List[Dict[str, str]] = []
+        routes_seen: Set[str] = set()
+        all_tests: List[Dict[str, Any]] = []
+        tests_seen: Set[str] = set()
+        all_impacted_files: Set[str] = set()
+        per_symbol_impact: Dict[str, Any] = {}
+        total_callers_count = 0
+
+        for s_info in modified_symbols:
+            sym = s_info["symbol"]
+            impact_res = self.get_impact_radius(sym, max_depth=max_depth, max_results=max_results)
+            per_symbol_impact[sym] = impact_res
+
+            for r in impact_res.get("impacted_external_routes", []):
+                r_key = f"{r['route']}::{r['file_path']}"
+                if r_key not in routes_seen:
+                    routes_seen.add(r_key)
+                    all_routes.append(r)
+
+            for t in impact_res.get("affected_tests", []):
+                t_key = f"{t['file_path']}::{t['symbol']}"
+                if t_key not in tests_seen:
+                    tests_seen.add(t_key)
+                    all_tests.append(t)
+
+            for f in impact_res.get("impacted_files", []):
+                all_impacted_files.add(f)
+
+            total_callers_count += impact_res.get("total_impacted_symbols", 0)
+
+        return {
+            "status": "success",
+            "target": target_ref,
+            "changed_files_count": len(changed_files),
+            "changed_files": sorted(list(changed_files.keys())),
+            "modified_symbols": modified_symbols,
+            "total_impacted_symbols": total_callers_count,
+            "impacted_files_count": len(all_impacted_files),
+            "impacted_files": sorted(list(all_impacted_files)),
+            "impacted_routes": all_routes,
+            "affected_tests": all_tests,
+            "per_symbol_impact": per_symbol_impact,
+        }
+
 
 def format_callers_markdown(res: Dict[str, Any]) -> str:
     """Format callers as Markdown evidence report"""
@@ -2350,6 +2580,13 @@ def format_impact_markdown(res: Dict[str, Any]) -> str:
             lines.append(f"- `{r['route']}` (handled by `{r['handler']}` at `{r['file_path']}`:L{r['line']})")
         lines.append("")
 
+    tests = res.get("affected_tests", [])
+    if tests:
+        lines.append("## 🧪 Directly/Indirectly Affected Unit Tests (Recommended to run):")
+        for t in tests:
+            lines.append(f"- `{t['symbol']}` (`{t['file_path']}`:L{t['line']})")
+        lines.append("")
+
     if files:
         lines.append("## 📁 Affected Source Files:")
         for f in files:
@@ -2405,6 +2642,80 @@ def format_references_markdown(res: Dict[str, Any]) -> str:
             lines.append(f"- **{idx}. `{f_path}`:L{line}**")
             lines.append(f"  ```\n  {content}\n  ```")
         lines.append("")
+
+    return "\n".join(lines)
+
+def format_diff_context_markdown(res: Dict[str, Any]) -> str:
+    """Format git diff blast radius and code review context as Markdown"""
+    if res.get("status") != "success":
+        return f"❌ {res.get('message', 'Failed to analyze git diff context')}"
+
+    if res.get("changed_files_count", 0) == 0:
+        return f"✅ **Git Diff Clean**: {res.get('message', 'No changes detected.')}"
+
+    target = res.get("target", "HEAD")
+    changed_files = res.get("changed_files", [])
+    mod_syms = res.get("modified_symbols", [])
+    routes = res.get("impacted_routes", [])
+    tests = res.get("affected_tests", [])
+    total_callers = res.get("total_impacted_symbols", 0)
+    files = res.get("impacted_files", [])
+    per_sym = res.get("per_symbol_impact", {})
+
+    lines = [f"# 🎯 Git Diff Blast-Radius & Code Review Context (`{target}`)\n"]
+    lines.append(
+        f"> 📊 **Diff Scope**: **{len(changed_files)} changed files**, **{len(mod_syms)} modified AST symbols**.\n"
+        f"> ⚠️ **Impact Blast Radius**: **{total_callers} upstream callers**, **{len(files)} impacted files**, "
+        f"**{len(routes)} Web API routes**, **{len(tests)} unit tests**.\n"
+    )
+
+    if mod_syms:
+        lines.append("## 📝 1. Directly Modified AST Symbols:")
+        for s in mod_syms:
+            route_tag = f" 🌐 [route: `{s['route_info']}`]" if s.get("route_info") else ""
+            lines.append(f"- `{s['symbol']}` (`{s['file_path']}`:L{s['start_line']}-{s['end_line']}) [{s['type']}]{route_tag}")
+        lines.append("")
+
+    if routes:
+        lines.append("## 🌐 2. Affected External Web API Routes (Critical Regression Check):")
+        for r in routes:
+            lines.append(f"- `{r['route']}` (handled by `{r['handler']}` at `{r['file_path']}`:L{r['line']})")
+        lines.append("")
+
+    if tests:
+        lines.append("## 🧪 3. Affected Unit Tests (Recommended to Run Before Merge):")
+        for t in tests:
+            lines.append(f"- `{t['symbol']}` (`{t['file_path']}`:L{t['line']})")
+        lines.append("")
+
+    if per_sym:
+        lines.append("## 🌲 4. Propagation Chains per Modified Symbol:")
+        for sym, imp in per_sym.items():
+            chain = imp.get("impact_propagation_chain", [])
+            lines.append(f"### `{sym}` (Impacts {len(chain)} symbols):")
+            if not chain:
+                lines.append("  - *(No upstream callers found; isolated symbol or top-level entry point)*")
+            else:
+                for item in chain[:15]:
+                    d = item["depth"]
+                    s_name = item["symbol"]
+                    f_p = item["file_path"]
+                    l = item["line"]
+                    rt = f" 🌐 [route: `{item['route']}`]" if item.get("route") else ""
+                    indent = "  " * d
+                    lines.append(f"{indent}- `{s_name}` ({f_p}:L{l}){rt}")
+                if len(chain) > 15:
+                    lines.append(f"    - *... ({len(chain) - 15} additional callers collapsed)*")
+            lines.append("")
+
+    lines.append("## 💡 AI Code Review & Regression Checklist:")
+    lines.append("1. **Signature & Contract Stability**: Verify parameter types and return shapes of modified symbols.")
+    if routes:
+        lines.append(f"2. **API Backward Compatibility**: Double-check that {len(routes)} exposed Web route contracts remain unbroken.")
+    if tests:
+        lines.append(f"3. **Run Targeted Tests**: Execute the {len(tests)} affected unit tests above before merging.")
+    else:
+        lines.append("3. **Missing Test Coverage**: No unit tests directly invoke the modified symbols. Consider adding test coverage.")
 
     return "\n".join(lines)
 

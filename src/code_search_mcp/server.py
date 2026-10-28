@@ -29,6 +29,7 @@ from code_search_mcp.graph_engine import (
     format_callees_markdown,
     format_impact_markdown,
     format_references_markdown,
+    format_diff_context_markdown,
 )
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
@@ -377,6 +378,35 @@ def find_references(symbol_or_keyword: str, path: str = "") -> str:
     except Exception as e:
         sys.stderr.write(f"[code-search-graph] find_references error: {e}\n")
         return f"Failed to find references: {str(e)}"
+
+
+@mcp.tool(
+    description="Analyze git diff changes to calculate blast radius and affected Web routes/tests. Use during code reviews, PR inspection, or before committing code.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
+def get_diff_context(target: str = "HEAD", path: str = "", max_depth: int = 3, max_results: int = 50) -> str:
+    """Analyze git diff changes against graph to calculate blast radius, affected Web routes, and recommended tests.
+
+    Args:
+        target: Git ref, commit, or branch to diff against (default: 'HEAD', comparing working tree and staged changes)
+        path: Repository root path (optional, defaults to current project)
+        max_depth: Maximum propagation depth for blast radius (default: 3)
+        max_results: Maximum number of impacted symbols to track (default: 50)
+
+    Returns:
+        Markdown report containing modified symbols, affected external API routes, unit tests, and propagation tree
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "Error: Could not resolve target repository path. Please provide 'path'."
+
+        engine = CodeGraphEngine.get_instance(target_repo)
+        res = engine.get_diff_context(target=target, max_depth=max_depth, max_results=max_results)
+        return format_diff_context_markdown(res)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-graph] get_diff_context error: {e}\n")
+        return f"Failed to analyze git diff context: {str(e)}"
 
 
 @mcp.tool(

@@ -55,7 +55,7 @@ def test_mcp_stdio_protocol():
 
     try:
         # 1. 握手阶段: initialize
-        print("\n[1/6] 握手请求: initialize...")
+        print("\n[1/7] 握手请求: initialize...")
         init_req = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -76,7 +76,7 @@ def test_mcp_stdio_protocol():
         send_request({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
         # 3. 发现阶段: tools/list
-        print("\n[2/6] 工具枚举: tools/list...")
+        print("\n[2/7] 工具枚举: tools/list...")
         send_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools_resp = read_response()
         assert tools_resp.get("id") == 2
@@ -95,6 +95,7 @@ def test_mcp_stdio_protocol():
             "get_symbol_callees",
             "get_impact_radius",
             "find_references",
+            "get_diff_context",
             "get_watch_status",
         ]
         for exp in expected_tools:
@@ -111,10 +112,10 @@ def test_mcp_stdio_protocol():
                 assert annotations.get("readOnlyHint") is False, "index_codebase readOnlyHint 必须为 False"
             else:
                 assert annotations.get("readOnlyHint") is True, f"工具 {name} readOnlyHint 必须为 True"
-        print("   ✅ 11 项 MCP 核心工具定义、英文描述与标准 annotations 全部规范暴露！")
+        print(f"   ✅ {len(tools)} 项 MCP 核心工具定义、英文描述与标准 annotations 全部规范暴露！")
 
         # 4. 调用工具: search_codebase (向量检索)
-        print("\n[3/6] JSON-RPC 调用: search_codebase...")
+        print("\n[3/7] JSON-RPC 调用: search_codebase...")
         send_request({
             "jsonrpc": "2.0",
             "id": 3,
@@ -136,7 +137,7 @@ def test_mcp_stdio_protocol():
         print(f"   ✓ search_codebase 返回正常 (预览前120字符):\n     {text[:120].replace(chr(10), ' ')}...")
 
         # 5. 调用工具: get_impact_radius (图谱爆炸半径)
-        print("\n[4/6] JSON-RPC 调用: get_impact_radius...")
+        print("\n[4/7] JSON-RPC 调用: get_impact_radius...")
         send_request({
             "jsonrpc": "2.0",
             "id": 4,
@@ -158,7 +159,7 @@ def test_mcp_stdio_protocol():
         print(f"   ✓ get_impact_radius 返回正常 (命中受波及 API 路由)")
 
         # 6. 调用工具: explore_codebase (一键全链路探索)
-        print("\n[5/6] JSON-RPC 调用: explore_codebase...")
+        print("\n[5/7] JSON-RPC 调用: explore_codebase...")
         send_request({
             "jsonrpc": "2.0",
             "id": 5,
@@ -179,7 +180,7 @@ def test_mcp_stdio_protocol():
         print(f"   ✓ explore_codebase 返回正常 (生成完整 ASCII 调用依赖树与源码)")
 
         # 7. 调用工具: find_references (反向引用)
-        print("\n[6/6] JSON-RPC 调用: find_references...")
+        print("\n[6/7] JSON-RPC 调用: find_references...")
         send_request({
             "jsonrpc": "2.0",
             "id": 6,
@@ -197,6 +198,26 @@ def test_mcp_stdio_protocol():
         ref_text = ref_resp.get("result", {}).get("content", [])[0].get("text", "")
         assert "References" in ref_text or "反向引用" in ref_text
         print(f"   ✓ find_references 返回正常")
+
+        # 8. 调用工具: get_diff_context (Git Diff 审查与爆炸半径)
+        print("\n[7/7] JSON-RPC 调用: get_diff_context...")
+        send_request({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "get_diff_context",
+                "arguments": {
+                    "target": "HEAD",
+                    "path": sample_dir,
+                },
+            },
+        })
+        diff_resp = read_response()
+        assert diff_resp.get("id") == 7
+        diff_text = diff_resp.get("result", {}).get("content", [])[0].get("text", "")
+        assert "Git Diff" in diff_text or "Clean" in diff_text
+        print(f"   ✓ get_diff_context 返回正常 (成功联动 Git Diff 与代码图谱)")
 
         print("\n" + "=" * 75)
         print("🎉 恭喜！标准 MCP JSON-RPC Stdio 协议端到端测试 100% 全部通过！")

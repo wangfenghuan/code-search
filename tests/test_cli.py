@@ -59,7 +59,7 @@ def test_cli_all_subcommands():
     # 1b. Test --version
     code, out, err = run_cli_cmd(["--version"])
     assert code == 0, f"--version failed: {err}"
-    assert "0.8.9" in out or "Version" in out
+    assert "0.8.10" in out or "Version" in out
     print("✅ 1b. CLI --version test passed")
 
     # 2. Test index
@@ -136,8 +136,14 @@ def test_cli_all_subcommands():
     assert "Dry Run" in out
     print("✅ 12. CLI clean dry-run test passed")
 
+    # 13. Test diff and review
+    code, out, err = run_cli_cmd(["diff", "HEAD", "--path", str(SAMPLE_REPO)])
+    assert code == 0, f"diff failed: {err}"
+    assert "Git Diff" in out or "Review" in out or "Clean" in out
+    print("✅ 13. CLI diff and review blast-radius test passed")
+
     print("\n" + "=" * 65)
-    print("🎉 Congratulations! All 12 CLI subcommand tests passed 100%!")
+    print("🎉 Congratulations! All 13 CLI subcommand tests passed 100%!")
     print("=" * 65 + "\n")
 
 
