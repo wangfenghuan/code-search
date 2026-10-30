@@ -59,7 +59,7 @@ def test_cli_all_subcommands():
     # 1b. Test --version
     code, out, err = run_cli_cmd(["--version"])
     assert code == 0, f"--version failed: {err}"
-    assert "0.8.11" in out or "Version" in out
+    assert "0.8.12" in out or "Version" in out
     print("✅ 1b. CLI --version test passed")
 
     # 2. Test index
@@ -155,8 +155,16 @@ def test_cli_all_subcommands():
     assert "--port" in out or "--no-browser" in out
     print("✅ 15. CLI interactive Web UI command test passed")
 
+    # 16. Test daemon commands
+    code, out, err = run_cli_cmd(["daemon", "--help"])
+    assert code == 0, f"daemon --help failed: {err}"
+    assert "start" in out and "stop" in out and "status" in out
+    code, out, err = run_cli_cmd(["daemon", "status"])
+    assert code == 0, f"daemon status failed: {err}"
+    print("✅ 16. CLI persistent background daemon command tests passed")
+
     print("\n" + "=" * 65)
-    print("🎉 Congratulations! All 15 CLI subcommand tests passed 100%!")
+    print("🎉 Congratulations! All 16 CLI subcommand tests passed 100%!")
     print("=" * 65 + "\n")
 
 

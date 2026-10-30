@@ -42,6 +42,7 @@ from .javascript import TSJSParser
 from .python import PythonParser
 from .rust import RustParser
 from .vue import VueParser
+from .svelte import SvelteParser
 
 __all__ = [
     "TreeSitterParser",
@@ -52,6 +53,7 @@ __all__ = [
     "JavaParser",
     "RustParser",
     "VueParser",
+    "SvelteParser",
     "ParsedSymbol",
     "FileImports",
     "EXTENSION_LANG_MAP",

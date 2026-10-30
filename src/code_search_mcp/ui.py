@@ -35,7 +35,7 @@ if sys.platform == "win32":
 console = Console(highlight=False, legacy_windows=False)
 err_console = Console(stderr=True, highlight=False, legacy_windows=False)
 
-VERSION = "0.8.11"
+VERSION = "0.8.12"
 
 LOGO_BANNER = r"""[bold bright_cyan]   ____ ___  ____  _____     ____  _____    _    ____   ____ _   _ 
   / ___/ _ \|  _ \| ____|   / ___|| ____|  / \  |  _ \ / ___| | | |
@@ -158,6 +158,7 @@ def _detect_lexer(file_path: str) -> str:
         ".yaml": "yaml",
         ".toml": "toml",
         ".vue": "html",
+        ".svelte": "html",
         ".sql": "sql",
         ".sh": "bash",
         ".bash": "bash",
@@ -536,3 +537,83 @@ def print_ui_banner(repo_path: Path, url: str):
     )
     console.print()
 
+
+
+def print_daemon_banner(info: dict):
+    """Render daemon startup notification card"""
+    pid = info.get("pid", "N/A")
+    port = info.get("port", "N/A")
+    log_file = info.get("log_file", "")
+    card_text = (
+        f"  🚀 [bold]Daemon Status[/bold]  [bold bright_green]Active & Running[/bold bright_green]\n"
+        f"  🔢 [bold]Process PID[/bold]    [cyan]{pid}[/cyan]\n"
+        f"  🌐 [bold]Local Port[/bold]     [bright_magenta]127.0.0.1:{port}[/bright_magenta]\n"
+        f"  ⚡ [bold]Acceleration[/bold]   [bold white]Sub-20ms instant CLI responses[/bold white]\n"
+        f"  📝 [bold]Log File[/bold]       [dim]{log_file}[/dim]\n"
+        f"\n"
+        f"  [dim]CLI commands will now automatically query this daemon.\n"
+        f"  Stop anytime with: [bold]code-search-graph daemon stop[/bold][/dim]"
+    )
+    console.print()
+    console.print(
+        Panel(
+            card_text,
+            title="[bold bright_cyan]⚡ code-search-graph Background Daemon ⚡[/bold bright_cyan]",
+            border_style="bright_cyan",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+    console.print()
+
+
+def print_daemon_status(status: Optional[dict]):
+    """Render daemon status inquiry card"""
+    if not status or status.get("status") != "running":
+        console.print()
+        console.print(
+            Panel(
+                "  🛑 [bold red]Daemon is not running[/bold red]\n\n"
+                "  CLI commands are running in standalone mode (~1.3s cold startup).\n"
+                "  Start the background daemon for [bold bright_green]sub-20ms queries[/bold bright_green]:\n"
+                "    [bold cyan]code-search-graph daemon start[/bold cyan]",
+                title="[bold yellow]Daemon Status[/bold yellow]",
+                border_style="yellow",
+                box=box.ROUNDED,
+                padding=(1, 2),
+                expand=False,
+            )
+        )
+        console.print()
+        return
+
+    pid = status.get("pid", "N/A")
+    port = status.get("port", "N/A")
+    uptime = status.get("uptime_seconds", 0)
+    cached_repos = status.get("cached_repos", [])
+    repos_str = ", ".join(cached_repos[:3]) if cached_repos else "None yet (warmed on first query)"
+    if len(cached_repos) > 3:
+        repos_str += f" (+{len(cached_repos)-3} more)"
+
+    card_text = (
+        f"  🟢 [bold]State[/bold]            [bold bright_green]Running (Healthy)[/bold bright_green]\n"
+        f"  🔢 [bold]Process PID[/bold]      [cyan]{pid}[/cyan]\n"
+        f"  🌐 [bold]Bound Port[/bold]       [bright_magenta]127.0.0.1:{port}[/bright_magenta]\n"
+        f"  ⏱️  [bold]Uptime[/bold]           [white]{uptime}s[/white]\n"
+        f"  🧠 [bold]Warm Repos[/bold]       [dim]{repos_str}[/dim]\n"
+        f"\n"
+        f"  [dim]Stop with: [bold]code-search-graph daemon stop[/bold][/dim]"
+    )
+    console.print()
+    console.print(
+        Panel(
+            card_text,
+            title="[bold bright_cyan]⚡ Daemon Status & Memory Cache ⚡[/bold bright_cyan]",
+            border_style="bright_blue",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+    console.print()

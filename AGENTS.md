@@ -29,6 +29,7 @@ code-search-mcp/
 │       ├── ripgrep_engine.py   # Embedded ripgrep integration & exact search engine
 │       ├── embeddings.py       # FastEmbed / ONNX Runtime local vector embeddings
 │       ├── watcher.py          # OS-native kernel file watcher for sub-second auto sync
+│       ├── daemon.py           # Persistent warm-memory IPC daemon (sub-20ms queries)
 │       ├── config.py           # Path management (~/.code-search-graph) & global constants
 │       ├── installer.py        # One-click client auto-config (Claude, Cursor, Windsurf)
 │       ├── text_utils.py       # CamelCase / snake_case splitting & token extraction
@@ -40,6 +41,7 @@ code-search-mcp/
 │           ├── python.py       # Python AST parser & call extractor
 │           ├── javascript.py   # TypeScript & JavaScript parser
 │           ├── vue.py          # Vue Single File Component (.vue SFC) parser
+│           ├── svelte.py       # Svelte SFC (3/4/5 runes & template) parser
 │           ├── java.py         # Java Spring Boot & class parser
 │           ├── go.py           # Go struct & function parser
 │           └── rust.py         # Rust trait, struct & impl parser

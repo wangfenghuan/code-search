@@ -84,6 +84,8 @@ LANG_BUILTINS: Dict[str, Set[str]] = {
     "go": GO_BUILTINS,
     "java": JAVA_BUILTINS,
     "rust": RUST_BUILTINS,
+    "vue": JS_BUILTINS,
+    "svelte": JS_BUILTINS,
 }
 
 BUILTIN_CALLS: Set[str] = PYTHON_BUILTINS | JS_BUILTINS | GO_BUILTINS | JAVA_BUILTINS | RUST_BUILTINS
@@ -142,6 +144,7 @@ EXTENSION_LANG_MAP: Dict[str, str] = {
     ".java": "java",
     ".rs": "rust",
     ".vue": "vue",
+    ".svelte": "svelte",
 }
 
 

@@ -79,6 +79,9 @@ code-search-graph index .
 
   # Launch interactive Code Map Web UI in browser
   code-search-graph ui
+
+  # Start background daemon for sub-20ms instant CLI queries
+  code-search-graph daemon start
   ```
 
 ---
@@ -213,6 +216,17 @@ Combines:
 
 Fused via Reciprocal Rank Fusion ($RRF\_Score = \sum \frac{1}{k + rank_i}$) with **automatic camelCase / snake_case identifier splitting** (e.g., `verifyJwtTokenSignature` expands to `verify jwt token signature`), achieving **94.6% recall** on natural language code queries.
 
+### Persistent Background Daemon (`code-search-graph daemon`)
+Eliminates Python cold-start overhead (~1.3s) by maintaining a warm in-memory service on loopback IPC:
+- Pre-warmed SQLite graph engines, vector searchers, and tree-sitter AST parsers
+- Drops CLI query response times down to **5–20 milliseconds**
+- Zero-friction auto-routing: CLI commands automatically query the daemon if running, with transparent fallback to standalone mode if stopped.
+
+### First-Class Svelte & Vue SFC Support
+Full AST symbol and call graph extraction for modern component frameworks:
+- **Svelte (`.svelte`)**: Svelte 3/4 and Svelte 5 runes (`$state`, `$derived`, `$props`, `$effect`), `<script context="module">`, `<script lang="ts">`, event bindings (`on:click`, `onclick`), and SvelteKit route conventions.
+- **Vue (`.vue`)**: Vue 2/3 SFCs, `<script setup>`, Composition & Options API, `<template>` event bindings (`@click`, `v-model`).
+
 ### Dead Code & Zombie Function Detection (`find_dead_code`)
 Queries graph nodes with zero incoming callers across Python, Java, TypeScript, Go, and Rust. Intelligently filters out framework route endpoints, entry points (`main`, `__init__`), and test suites to pinpoint truly abandoned code for safe refactoring.
 
@@ -307,7 +321,12 @@ code-search-graph deadcode --json
 code-search-graph ui -p /path/to/project
 code-search-graph ui --port 8765 --no-browser
 
-# 11. Cache management
+# 11. Persistent background daemon (sub-20ms queries)
+code-search-graph daemon start
+code-search-graph daemon status
+code-search-graph daemon stop
+
+# 12. Cache management
 code-search-graph cache
 code-search-graph clean --orphaned
 ```
@@ -321,6 +340,7 @@ code-search-graph clean --orphaned
 | **Python** | Tree-sitter | Functions, Classes, Methods, Decorators, Docstrings, Calls | FastAPI, Flask |
 | **TypeScript / JavaScript** | Tree-sitter | Functions, Classes, Interfaces, Types, Arrow Functions, Calls | Express, NestJS |
 | **Vue (.vue SFC)** | Tree-sitter | `<template>` components, `<script>` TypeScript/JS symbols | Vue 2 / Vue 3 Composition & Options API |
+| **Svelte (.svelte SFC)** | Tree-sitter | Components, Props, Runes (`$state`), `<script>` TS/JS, Events (`on:click`, `onclick`) | Svelte 3/4/5, SvelteKit (`+page.svelte`) |
 | **Go** | Tree-sitter | Functions, Structs, Methods, Interfaces, Calls | Gin, `net/http` |
 | **Java** | Tree-sitter | Classes, Interfaces, Methods, Constructors, DI Inferences | Spring Boot (`@GetMapping`, `@RestController`) |
 | **Rust** | Tree-sitter | Functions, Structs, Enums, Traits, Impl blocks, Calls | Actix-web, Axum |
@@ -383,6 +403,9 @@ code-search-graph index .
 
   # 启动本地可视化代码地图与 Web UI
   code-search-graph ui
+
+  # 启动后台守护进程（CLI 查询进入 20ms 级极速响应）
+  code-search-graph daemon start
   ```
 
 ---
@@ -407,13 +430,15 @@ code-search-graph             [█                                       ] 1,150
 ### 核心特性
 
 1. **一键手术级探索 (`explore_codebase`)**：单次调用返回入口路由、实现源码、上下游调用链路与证据切片，杜绝反复读文件。
-2. **死代码与僵尸函数检测 (`find_dead_code` / `deadcode`)**：扫描全库 0 入度调用节点，自动排除生命周期入口与路由，精准定位无用代码，安全重构。
-3. **本地交互式代码地图 (`code-search-graph ui`)**：零额外依赖启动本地 Web 服务，力导向图可视化调用链路，支持符号搜索、死代码高亮与源码切片预览。
-4. **改动爆炸半径 (`get_impact_radius`)**：重构前分析受波及的上游模块、文件与暴露的 HTTP API。
-5. **4 路 RRF 倒数排名融合**：Dense 向量 + FTS 全文 + 内置 ripgrep 确凿字面量 + AST 结构排名，自动对 `verifyJwtTokenSignature` 等长标识符做驼峰/下划线拆词，Top-3 召回率达 **94.6%**。
-6. **架构大纲地图 (`get_codebase_outline`)**：消耗数百 Token 快速理清多语言项目全貌与模块职责。
-7. **内置全平台预编译 ripgrep**：内置 Windows (`rg.exe`)、Linux (`musl`/`arm64`) 与 macOS (`Apple Silicon`/`Intel`) 静态二进制，零环境依赖。
-8. **恒定微批次低显存流水线**：300 块微批次流式写入 + 垃圾回收约束，常驻内存低于 **160MB**，彻底根除大仓库 **OOM 137**。
+2. **高频加速守护进程 (`code-search-graph daemon`)**：常驻后台保持 SQLite 图谱与嵌入模型热加载，CLI 查询延迟从 1.3 秒直接降至 **5~20 毫秒**；无缝自适应降级，启动即享极致丝滑。
+3. **首级 Svelte 与 Vue 单文件组件支持**：支持 Svelte 3/4/5 Runes (`$state`, `$derived`) 与 SvelteKit 路由约定，深度提取组件调用、事件绑定与 TS 脚本。
+4. **死代码与僵尸函数检测 (`find_dead_code` / `deadcode`)**：扫描全库 0 入度调用节点，自动排除生命周期入口与路由，精准定位无用代码，安全重构。
+5. **本地交互式代码地图 (`code-search-graph ui`)**：零额外依赖启动本地 Web 服务，力导向图可视化调用链路，支持符号搜索、死代码高亮与源码切片预览。
+6. **改动爆炸半径 (`get_impact_radius`)**：重构前分析受波及的上游模块、文件与暴露的 HTTP API。
+7. **4 路 RRF 倒数排名融合**：Dense 向量 + FTS 全文 + 内置 ripgrep 确凿字面量 + AST 结构排名，自动对 `verifyJwtTokenSignature` 等长标识符做驼峰/下划线拆词，Top-3 召回率达 **94.6%**。
+8. **架构大纲地图 (`get_codebase_outline`)**：消耗数百 Token 快速理清多语言项目全貌与模块职责。
+9. **内置全平台预编译 ripgrep**：内置 Windows (`rg.exe`)、Linux (`musl`/`arm64`) 与 macOS (`Apple Silicon`/`Intel`) 静态二进制，零环境依赖。
+10. **恒定微批次低显存流水线**：300 块微批次流式写入 + 垃圾回收约束，常驻内存低于 **160MB**，彻底根除大仓库 **OOM 137**。
 
 ### 实测性能基准
 

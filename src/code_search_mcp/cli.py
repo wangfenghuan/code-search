@@ -12,6 +12,8 @@ from code_search_mcp.ui import (
     print_banner,
     print_cache_table,
     print_clean_result,
+    print_daemon_banner,
+    print_daemon_status,
     print_dead_code_result,
     print_error,
     print_exact_results,
@@ -50,6 +52,8 @@ Common Examples:
   code-search-graph diff HEAD~1                       # Git diff blast-radius & AI code review context
   code-search-graph deadcode                          # Detect uncalled functions & dead zombie code
   code-search-graph ui                                # Launch interactive Code Map Web UI in browser
+  code-search-graph daemon start                      # Start high-speed background daemon (sub-20ms queries)
+  code-search-graph daemon status                     # Check background daemon & memory cache status
   code-search-graph cache                             # View global index cache entries & disk usage
   code-search-graph clean --orphaned                  # Safely clean orphaned caches to free disk space
   code-search-graph install                           # One-click auto-config for Claude / Cursor / Windsurf MCP
@@ -328,14 +332,28 @@ def callers_cmd(
         "-p",
         help="Target repository path",
     ),
+    no_daemon: bool = typer.Option(
+        False,
+        "--no-daemon",
+        help="Bypass background daemon and run in standalone mode",
+    ),
 ):
-    from code_search_mcp.graph_engine import CodeGraphEngine, format_callers_markdown
-
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
         print_error("Target repository not found")
         raise typer.Exit(code=1)
 
+    if not no_daemon:
+        from code_search_mcp.daemon import DaemonClient
+        client = DaemonClient()
+        if client.is_running():
+            res = client.call("/api/callers", {"path": str(target), "symbol_name": symbol})
+            if res and "error" not in res:
+                from code_search_mcp.graph_engine import format_callers_markdown
+                print_markdown(format_callers_markdown(res))
+                return
+
+    from code_search_mcp.graph_engine import CodeGraphEngine, format_callers_markdown
     engine = CodeGraphEngine(target)
     with console.status(f"[bold cyan]Tracing upstream callers for '{symbol}'...[/bold cyan]", spinner="dots"):
         res = engine.get_callers(symbol)
@@ -356,14 +374,28 @@ def callees_cmd(
         "-p",
         help="Target repository path",
     ),
+    no_daemon: bool = typer.Option(
+        False,
+        "--no-daemon",
+        help="Bypass background daemon and run in standalone mode",
+    ),
 ):
-    from code_search_mcp.graph_engine import CodeGraphEngine, format_callees_markdown
-
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
         print_error("Target repository not found")
         raise typer.Exit(code=1)
 
+    if not no_daemon:
+        from code_search_mcp.daemon import DaemonClient
+        client = DaemonClient()
+        if client.is_running():
+            res = client.call("/api/callees", {"path": str(target), "symbol_name": symbol})
+            if res and "error" not in res:
+                from code_search_mcp.graph_engine import format_callees_markdown
+                print_markdown(format_callees_markdown(res))
+                return
+
+    from code_search_mcp.graph_engine import CodeGraphEngine, format_callees_markdown
     engine = CodeGraphEngine(target)
     with console.status(f"[bold cyan]Tracing downstream dependencies for '{symbol}'...[/bold cyan]", spinner="dots"):
         res = engine.get_callees(symbol)
@@ -396,14 +428,33 @@ def impact_cmd(
         "-m",
         help="Maximum number of impacted symbols to track (default: 50, prevents BFS explosion)",
     ),
+    no_daemon: bool = typer.Option(
+        False,
+        "--no-daemon",
+        help="Bypass background daemon and run in standalone mode",
+    ),
 ):
-    from code_search_mcp.graph_engine import CodeGraphEngine, format_impact_markdown
-
     target = resolve_repo_path(path or positional_path or "")
     if not target or not target.exists():
         print_error("Target repository not found")
         raise typer.Exit(code=1)
 
+    if not no_daemon:
+        from code_search_mcp.daemon import DaemonClient
+        client = DaemonClient()
+        if client.is_running():
+            res = client.call("/api/impact", {
+                "path": str(target),
+                "symbol_name": symbol,
+                "depth": depth,
+                "max_results": max_results,
+            })
+            if res and "error" not in res:
+                from code_search_mcp.graph_engine import format_impact_markdown
+                print_markdown(format_impact_markdown(res))
+                return
+
+    from code_search_mcp.graph_engine import CodeGraphEngine, format_impact_markdown
     engine = CodeGraphEngine(target)
     with console.status(f"[bold cyan]Calculating blast radius for '{symbol}'...[/bold cyan]", spinner="dots"):
         res = engine.get_impact_radius(symbol, max_depth=depth, max_results=max_results)
@@ -484,6 +535,11 @@ def deadcode_cmd(
         "--json",
         help="Output raw JSON results",
     ),
+    no_daemon: bool = typer.Option(
+        False,
+        "--no-daemon",
+        help="Bypass background daemon and run in standalone mode",
+    ),
 ):
     import json
     from code_search_mcp.graph_engine import CodeGraphEngine
@@ -497,6 +553,22 @@ def deadcode_cmd(
     if not engine.load():
         print_error("Call graph database not found. Please run 'code-search-graph index .' first.")
         raise typer.Exit(code=1)
+
+    if not no_daemon:
+        from code_search_mcp.daemon import DaemonClient
+        client = DaemonClient()
+        if client.is_running():
+            res = client.call("/api/deadcode", {
+                "path": str(target_repo),
+                "limit": limit,
+                "include_tests": include_tests,
+            })
+            if res and "error" not in res:
+                if as_json:
+                    print(json.dumps(res, ensure_ascii=False, indent=2))
+                else:
+                    print_dead_code_result(res)
+                return
 
     with console.status("[bold magenta]Scanning for uncalled dead code & zombie functions...[/bold magenta]", spinner="dots"):
         res = engine.find_dead_code(limit=limit, include_tests=include_tests)
@@ -658,6 +730,58 @@ def cache_cmd(
     else:
         entries = mgr.list_entries()
         print_cache_table(summary, entries)
+
+
+
+
+daemon_app = typer.Typer(help="Manage high-speed background daemon service (sub-20ms CLI queries)")
+app.add_typer(daemon_app, name="daemon")
+
+
+@daemon_app.command("start", help="Start persistent background daemon service")
+def daemon_start_cmd(
+    port: int = typer.Option(0, "--port", "-p", help="Port to bind (default: auto 57123+)"),
+    foreground: bool = typer.Option(False, "--foreground", "-f", help="Run in foreground instead of detached background"),
+):
+    from code_search_mcp.daemon import start_daemon
+    ok, msg, info = start_daemon(port=port, foreground=foreground)
+    if ok and info:
+        print_daemon_banner(info)
+    elif ok:
+        console.print(f"[bold green]✔ {msg}[/bold green]")
+    else:
+        print_error(f"Failed to start daemon: {msg}")
+
+
+@daemon_app.command("stop", help="Stop running background daemon service")
+def daemon_stop_cmd():
+    from code_search_mcp.daemon import stop_daemon
+    ok, msg = stop_daemon()
+    if ok:
+        console.print(f"[bold green]✔ {msg}[/bold green]")
+    else:
+        console.print(f"[bold yellow]⚠️ {msg}[/bold yellow]")
+
+
+@daemon_app.command("status", help="Check background daemon service status and memory cache")
+def daemon_status_cmd():
+    from code_search_mcp.daemon import get_daemon_status
+    status = get_daemon_status()
+    print_daemon_status(status)
+
+
+@daemon_app.command("restart", help="Restart background daemon service")
+def daemon_restart_cmd(
+    port: int = typer.Option(0, "--port", "-p", help="Port to bind (default: auto 57123+)"),
+):
+    from code_search_mcp.daemon import stop_daemon, start_daemon
+    stop_daemon()
+    time.sleep(0.4)
+    ok, msg, info = start_daemon(port=port)
+    if ok and info:
+        print_daemon_banner(info)
+    else:
+        print_error(f"Failed to restart daemon: {msg}")
 
 
 @app.command("clean", help="Clean index caches and temporary data")

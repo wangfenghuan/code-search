@@ -25,6 +25,7 @@ from .javascript import TSJSParser
 from .python import PythonParser
 from .rust import RustParser
 from .vue import VueParser
+from .svelte import SvelteParser
 
 
 class TreeSitterParser:
@@ -58,6 +59,7 @@ class TreeSitterParser:
             self._parsers["rust"] = Parser(RUST_LANG)
         if JS_LANG:
             self._parsers["vue"] = Parser(JS_LANG)
+            self._parsers["svelte"] = Parser(JS_LANG)
 
         # 实例化各语言独立解析器
         self.py_parser = PythonParser()
@@ -66,6 +68,7 @@ class TreeSitterParser:
         self.java_parser = JavaParser()
         self.rust_parser = RustParser()
         self.vue_parser = VueParser(self.tsjs_parser)
+        self.svelte_parser = SvelteParser(self.tsjs_parser)
 
         # 语言解析器统一映射表 (纯分发调度体系)
         self._sub_parsers: Dict[str, BaseLanguageParser] = {
@@ -76,6 +79,7 @@ class TreeSitterParser:
             "java": self.java_parser,
             "rust": self.rust_parser,
             "vue": self.vue_parser,
+            "svelte": self.svelte_parser,
         }
 
         # 兼容性属性桥接 (供外部或历史代码访问底层 Query)
