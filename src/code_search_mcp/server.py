@@ -30,6 +30,7 @@ from code_search_mcp.graph_engine import (
     format_impact_markdown,
     format_references_markdown,
     format_diff_context_markdown,
+    format_dead_code_markdown,
 )
 from code_search_mcp.indexer import CodeIndexer
 from code_search_mcp.outline import ProjectOutlineGenerator
@@ -407,6 +408,34 @@ def get_diff_context(target: str = "HEAD", path: str = "", max_depth: int = 3, m
     except Exception as e:
         sys.stderr.write(f"[code-search-graph] get_diff_context error: {e}\n")
         return f"Failed to analyze git diff context: {str(e)}"
+
+
+@mcp.tool(
+    description="Find uncalled functions, dead methods, and zombie code across the codebase that have zero incoming callers. Use during code cleanup or refactoring.",
+    annotations=make_annotations(read_only=True, destructive=False),
+)
+def find_dead_code(path: str = "", limit: int = 50, include_tests: bool = False) -> str:
+    """Find uncalled functions and dead code across the codebase.
+
+    Args:
+        path: Repository root path (optional, defaults to current project)
+        limit: Maximum number of dead code candidates to return (default: 50)
+        include_tests: Whether to scan test files as dead code candidates (default: False)
+
+    Returns:
+        Markdown table of unreferenced functions and cleanup recommendations
+    """
+    try:
+        target_repo = resolve_repo_path(path)
+        if target_repo is None or not target_repo.exists():
+            return "Error: Could not resolve target repository path. Please provide 'path'."
+
+        engine = CodeGraphEngine.get_instance(target_repo)
+        res = engine.find_dead_code(limit=limit, include_tests=include_tests)
+        return format_dead_code_markdown(res)
+    except Exception as e:
+        sys.stderr.write(f"[code-search-graph] find_dead_code error: {e}\n")
+        return f"Failed to detect dead code: {str(e)}"
 
 
 @mcp.tool(

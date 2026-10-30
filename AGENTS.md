@@ -149,3 +149,4 @@ When an AI agent is working inside any project that has `code-search-graph` conf
 3. **Refactoring & Modifying Code**: **Always call `get_impact_radius(symbol_name=...)` before editing** important functions or classes, or **call `get_diff_context()` during PR code review** to inspect current changes. It reveals affected upstream callers, exposed HTTP routes, and recommended unit tests to protect against regressions.
 4. **Exact Identifiers & Constants**: Use `exact_search(pattern=...)` for sub-second ripgrep lookups of exact symbols, config keys, or error codes.
 5. **Reading Code**: Avoid reading entire large files. Use `get_file_content(path, start_line, end_line)` to inspect only the required lines.
+6. **Dead Code & Cleanup**: Call `find_dead_code()` to detect uncalled functions and zombie code before refactoring or deleting obsolete features.

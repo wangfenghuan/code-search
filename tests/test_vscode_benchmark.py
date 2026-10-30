@@ -138,12 +138,14 @@ def run_vscode_twophase_resolution_benchmark(editor_dir: Path):
     total_edges = len(edge_rows)
     high_conf_edges = sum(1 for r in edge_rows if r["confidence"] >= 0.7)
 
+    pct_high = (high_conf_edges / total_edges * 100) if total_edges > 0 else 0.0
     print(f"\n📈 VS Code 编辑器架构拓扑解析统计:")
     print(f"   • 全量确定性边总数: {total_edges} 条")
-    print(f"   • 高确信度确定边 (≥0.7): {high_conf_edges} 条 ({high_conf_edges/total_edges*100:.1f}%)")
+    print(f"   • 高确信度确定边 (≥0.7): {high_conf_edges} 条 ({pct_high:.1f}%)")
     print(f"   • 边解析类型分布:")
     for rtype, count in type_counts.most_common():
-        print(f"     - {rtype:16}: {count:6} 条 ({count/total_edges*100:5.1f}%)")
+        pct_v = (count / total_edges * 100) if total_edges > 0 else 0.0
+        print(f"     - {rtype:16}: {count:6} 条 ({pct_v:5.1f}%)")
 
     # 4. 真实查询响应延迟测试
     print(f"\n⚡ 真实查询毫秒级响应延迟 (Query Latency):")

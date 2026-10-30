@@ -2487,6 +2487,101 @@ class CodeGraphEngine:
             "per_symbol_impact": per_symbol_impact,
         }
 
+    def find_dead_code(self, limit: int = 100, include_tests: bool = False) -> Dict[str, Any]:
+        """死代码检测 (Dead Code Detection):
+        找出代码库中定义了但从未被任何其它代码调用的函数和方法（入度为 0 的孤立符号）。
+        自动排除：
+        - Web 路由入口点 (route_info 不为空)
+        - 语言内建魔法/生命周期方法 (如 __init__, main, constructor, init, default 等)
+        - 测试用例文件与测试函数 (默认排除，除非 include_tests=True)
+        """
+        if not self.load():
+            return {
+                "status": "error",
+                "message": "未找到代码库索引，请先执行 index_codebase",
+            }
+
+        conn = self._get_db()
+
+        # 1. 搜集所有被调用的符号名称（callee_name, callee_symbol, callee_qualified）
+        called_names = set(r[0] for r in conn.execute("SELECT DISTINCT callee_name FROM calls WHERE callee_name IS NOT NULL AND callee_name != ''"))
+        called_symbols = set(r[0] for r in conn.execute("SELECT DISTINCT callee_symbol FROM resolved_edges WHERE callee_symbol IS NOT NULL AND callee_symbol != ''"))
+        called_qualified = set(r[0] for r in conn.execute("SELECT DISTINCT callee_qualified FROM resolved_edges WHERE callee_qualified IS NOT NULL AND callee_qualified != ''"))
+        called_ids = set(r[0] for r in conn.execute("SELECT DISTINCT callee_id FROM resolved_edges WHERE callee_id IS NOT NULL AND callee_id != ''"))
+
+        all_called_names = called_names | called_symbols | called_qualified
+
+        # 2. 查询所有候选函数/方法
+        query_sql = """
+            SELECT id, symbol_name, chunk_type, file_path, start_line, end_line, route_info, qualified_name, docstring
+            FROM nodes
+            WHERE chunk_type IN ('function', 'method')
+        """
+        nodes = conn.execute(query_sql).fetchall()
+
+        # 语言内置/常见生命周期方法白名单
+        lifecycle_names = {
+            "main", "init", "run", "setup", "teardown", "start", "stop", "close",
+            "__init__", "__new__", "__str__", "__repr__", "__enter__", "__exit__",
+            "__call__", "__len__", "__getitem__", "__iter__", "__next__",
+            "constructor", "render", "default", "onMounted", "onUnmounted", "beforeCreate", "created",
+            "handle", "execute", "process", "configure", "destroy",
+        }
+
+        dead_candidates = []
+        for n in nodes:
+            sym = n["symbol_name"]
+            short_name = sym.split(".")[-1]
+            f_path = n["file_path"]
+
+            # 排除 Web 路由处理函数（由 HTTP 触发）
+            if n["route_info"]:
+                continue
+
+            # 排除生命周期及常见入口
+            if short_name in lifecycle_names or short_name.startswith("__"):
+                continue
+
+            # 默认排除测试文件与测试函数
+            if not include_tests and is_test_node(f_path, sym):
+                continue
+
+            # 检查是否被调用：
+            # 1) ID 是否在 resolved_edges 的 callee_id 中
+            if n["id"] in called_ids:
+                continue
+            # 2) 全称或短名是否在 callee 集合中
+            if sym in all_called_names or short_name in all_called_names:
+                continue
+            qual = n["qualified_name"]
+            if qual and (qual in all_called_names or qual.split(".")[-1] in all_called_names):
+                continue
+
+            dead_candidates.append({
+                "id": n["id"],
+                "symbol": sym,
+                "short_name": short_name,
+                "type": n["chunk_type"],
+                "file_path": f_path,
+                "start_line": n["start_line"],
+                "end_line": n["end_line"],
+                "lines_count": n["end_line"] - n["start_line"] + 1,
+                "docstring": (n["docstring"] or "").strip()[:80],
+            })
+
+        # 按文件路径和行号排序
+        dead_candidates.sort(key=lambda x: (x["file_path"], x["start_line"]))
+
+        return {
+            "status": "success",
+            "repo_path": str(self.repo_path),
+            "total_candidates": len(dead_candidates),
+            "total_analyzed_functions": len(nodes),
+            "dead_code": dead_candidates[:limit],
+            "limit": limit,
+            "truncated": len(dead_candidates) > limit,
+        }
+
 
 def format_callers_markdown(res: Dict[str, Any]) -> str:
     """Format callers as Markdown evidence report"""
@@ -2716,6 +2811,49 @@ def format_diff_context_markdown(res: Dict[str, Any]) -> str:
         lines.append(f"3. **Run Targeted Tests**: Execute the {len(tests)} affected unit tests above before merging.")
     else:
         lines.append("3. **Missing Test Coverage**: No unit tests directly invoke the modified symbols. Consider adding test coverage.")
+
+    return "\n".join(lines)
+
+def format_dead_code_markdown(res: Dict[str, Any]) -> str:
+    """Format dead code detection report as Markdown"""
+    if res.get("status") != "success":
+        return f"❌ {res.get('message', 'Failed to detect dead code')}"
+
+    total_candidates = res.get("total_candidates", 0)
+    total_analyzed = res.get("total_analyzed_functions", 0)
+    dead_list = res.get("dead_code", [])
+    limit = res.get("limit", 100)
+    truncated = res.get("truncated", False)
+
+    lines = [f"# 💀 Dead Code & Unreferenced Symbols Analysis\n"]
+    lines.append(
+        f"> 📊 **Scan Scope**: Analyzed **{total_analyzed} functions & methods**, "
+        f"discovered **{total_candidates} unreferenced candidates** (0 incoming callers).\n"
+        f"> ⚠️ **Caution**: Verify candidates before deleting. Public API libraries or reflection-invoked methods may lack explicit in-repo call edges.\n"
+    )
+
+    if total_candidates == 0:
+        lines.append("🎉 **Clean Codebase**: No unreferenced functions or methods detected! All symbols have incoming call edges or route bindings.")
+        return "\n".join(lines)
+
+    lines.append("## 📋 Unreferenced Functions & Methods (Potential Dead Code):")
+    lines.append("| # | Symbol Name | Type | File Location | Lines | Docstring / Purpose |")
+    lines.append("|---|---|---|---|---|---|")
+    for idx, d in enumerate(dead_list, start=1):
+        sym = d["symbol"]
+        t = d["type"]
+        loc = f"`{d['file_path']}`:L{d['start_line']}-{d['end_line']}"
+        l_cnt = f"{d['lines_count']} lines"
+        doc = d.get("docstring", "") or "—"
+        lines.append(f"| {idx} | `{sym}` | {t} | {loc} | {l_cnt} | {doc} |")
+
+    if truncated:
+        lines.append(f"\n> 🛑 Showing first **{limit}** of **{total_candidates}** unreferenced candidates. Pass `--limit <N>` to view more.")
+
+    lines.append("\n## 💡 Cleanup Recommendations:")
+    lines.append("1. **Verify Usage**: Check if any function is called via reflection, dynamic dispatch, or external downstream consumers.")
+    lines.append("2. **Safely Deprecate**: Add `@deprecated` warning or logging before deleting high-risk core methods.")
+    lines.append("3. **Remove Zombie Code**: Delete confirmed orphan utility functions to improve build times and reduce maintenance burden.")
 
     return "\n".join(lines)
 

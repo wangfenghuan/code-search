@@ -35,7 +35,7 @@ if sys.platform == "win32":
 console = Console(highlight=False, legacy_windows=False)
 err_console = Console(stderr=True, highlight=False, legacy_windows=False)
 
-VERSION = "0.8.10"
+VERSION = "0.8.11"
 
 LOGO_BANNER = r"""[bold bright_cyan]   ____ ___  ____  _____     ____  _____    _    ____   ____ _   _ 
   / ___/ _ \|  _ \| ____|   / ___|| ____|  / \  |  _ \ / ___| | | |
@@ -450,3 +450,89 @@ def run_indexing_with_progress(
 
     elapsed = time.perf_counter() - t0
     return res, elapsed
+
+def print_dead_code_result(res: dict[str, Any]):
+    """Render dead code detection report as Rich table"""
+    total_candidates = res.get("total_candidates", 0)
+    total_analyzed = res.get("total_analyzed_functions", 0)
+    dead_list = res.get("dead_code", [])
+    limit = res.get("limit", 100)
+
+    console.print()
+    if total_candidates == 0:
+        console.print(
+            Panel(
+                f"🎉 [bold green]Clean Codebase![/bold green] Analyzed [bold cyan]{total_analyzed}[/bold cyan] functions & methods.\n"
+                f"   [white]Zero unreferenced symbols detected. Every function has incoming call edges or route bindings.[/white]",
+                title="[bold green]💀 Dead Code Analysis: Clean[/bold green]",
+                border_style="green",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        )
+        console.print()
+        return
+
+    table = Table(
+        title=f"💀 [bold red]Dead Code & Unreferenced Symbols ({total_candidates} candidates found)[/bold red]\n"
+              f"[dim]Analyzed {total_analyzed} functions & methods across codebase[/dim]",
+        box=box.ROUNDED,
+        border_style="red",
+        header_style="bold bright_red",
+        show_lines=True,
+    )
+
+    table.add_column("#", justify="center", style="dim", width=4)
+    table.add_column("Symbol Name", style="bold yellow")
+    table.add_column("Type", justify="center", style="magenta", width=10)
+    table.add_column("Location", style="green")
+    table.add_column("Lines", justify="center", style="cyan", width=10)
+    table.add_column("Docstring / Purpose", style="dim")
+
+    for i, item in enumerate(dead_list, 1):
+        doc = item.get("docstring", "") or "—"
+        doc = " ".join(doc.split())[:60]
+        table.add_row(
+            str(i),
+            f"`{item['symbol']}`",
+            item["type"],
+            f"{item['file_path']}:L{item['start_line']}-{item['end_line']}",
+            f"{item['lines_count']} lines",
+            doc,
+        )
+
+    console.print(table)
+
+    summary_text = [
+        f"⚠️  [bold yellow]Cleanup Warning[/bold yellow]: Review each candidate before deleting. Public API libraries or reflection-invoked methods may lack in-repo call edges.",
+    ]
+    if len(dead_list) < total_candidates:
+        summary_text.append(f"🛑 Showing first [bold cyan]{len(dead_list)}[/bold cyan] of [bold red]{total_candidates}[/bold red] candidates. Pass [bold]--limit <N>[/bold] to view more.")
+
+    console.print(Panel("\n".join(summary_text), border_style="yellow", box=box.ROUNDED, padding=(0, 2)))
+    console.print()
+
+
+def print_ui_banner(repo_path: Path, url: str):
+    """Render interactive Code Map Web UI startup card"""
+    card_text = (
+        f"  📂 [bold]Repository[/bold]  [cyan]{repo_path}[/cyan]\n"
+        f"  🌐 [bold]Web URL[/bold]     [bold bright_green]{url}[/bold bright_green]\n"
+        f"  🧩 [bold]Graph Map[/bold]   [white]Interactive force-directed AST & call graph[/white]\n"
+        f"  💀 [bold]Dead Code[/bold]   [white]Integrated unreferenced symbol inspector[/white]\n"
+        f"\n"
+        f"  [dim]Press [bold red]Ctrl+C[/bold red] to stop the Web UI server[/dim]"
+    )
+    console.print()
+    console.print(
+        Panel(
+            card_text,
+            title="[bold bright_cyan]✨ Interactive Code Map & Web UI ✨[/bold bright_cyan]",
+            border_style="bright_blue",
+            box=box.ROUNDED,
+            padding=(1, 2),
+            expand=False,
+        )
+    )
+    console.print()
+

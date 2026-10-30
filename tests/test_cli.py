@@ -59,7 +59,7 @@ def test_cli_all_subcommands():
     # 1b. Test --version
     code, out, err = run_cli_cmd(["--version"])
     assert code == 0, f"--version failed: {err}"
-    assert "0.8.10" in out or "Version" in out
+    assert "0.8.11" in out or "Version" in out
     print("✅ 1b. CLI --version test passed")
 
     # 2. Test index
@@ -142,8 +142,21 @@ def test_cli_all_subcommands():
     assert "Git Diff" in out or "Review" in out or "Clean" in out
     print("✅ 13. CLI diff and review blast-radius test passed")
 
+    # 14. Test deadcode
+    code, out, err = run_cli_cmd(["deadcode", str(SAMPLE_REPO), "--json"])
+    assert code == 0, f"deadcode failed: {err}"
+    assert "dead_code" in out
+    assert "UserService.findAll" in out
+    print("✅ 14. CLI deadcode analysis test passed")
+
+    # 15. Test ui --help
+    code, out, err = run_cli_cmd(["ui", "--help"])
+    assert code == 0, f"ui --help failed: {err}"
+    assert "--port" in out or "--no-browser" in out
+    print("✅ 15. CLI interactive Web UI command test passed")
+
     print("\n" + "=" * 65)
-    print("🎉 Congratulations! All 13 CLI subcommand tests passed 100%!")
+    print("🎉 Congratulations! All 15 CLI subcommand tests passed 100%!")
     print("=" * 65 + "\n")
 
 

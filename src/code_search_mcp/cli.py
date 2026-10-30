@@ -12,11 +12,13 @@ from code_search_mcp.ui import (
     print_banner,
     print_cache_table,
     print_clean_result,
+    print_dead_code_result,
     print_error,
     print_exact_results,
     print_index_result,
     print_markdown,
     print_search_results,
+    print_ui_banner,
     print_version,
     print_watch_banner,
     run_indexing_with_progress,
@@ -46,6 +48,8 @@ Common Examples:
   code-search-graph callees "AuthService.login"       # Find downstream dependencies called by a function
   code-search-graph impact "User" --depth 3           # Blast-radius impact analysis (cross-file reverse propagation)
   code-search-graph diff HEAD~1                       # Git diff blast-radius & AI code review context
+  code-search-graph deadcode                          # Detect uncalled functions & dead zombie code
+  code-search-graph ui                                # Launch interactive Code Map Web UI in browser
   code-search-graph cache                             # View global index cache entries & disk usage
   code-search-graph clean --orphaned                  # Safely clean orphaned caches to free disk space
   code-search-graph install                           # One-click auto-config for Claude / Cursor / Windsurf MCP
@@ -448,6 +452,101 @@ def diff_cmd(
     with console.status(f"[bold cyan]Analyzing git diff against '{target}'...[/bold cyan]", spinner="dots"):
         res = engine.get_diff_context(target=target, max_depth=depth, max_results=max_results)
     print_markdown(format_diff_context_markdown(res))
+
+
+@app.command("deadcode", help="Detect uncalled functions, dead methods, and zombie code")
+@app.command("dead-code", help="Alias for deadcode")
+def deadcode_cmd(
+    positional_path: Optional[str] = typer.Argument(
+        None,
+        metavar="[PATH]",
+        help="Target repository path (positional argument, default: current or most recently indexed repo)",
+    ),
+    path: Optional[str] = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Target repository path",
+    ),
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        "-l",
+        help="Maximum number of dead code candidates to display (default: 50)",
+    ),
+    include_tests: bool = typer.Option(
+        False,
+        "--include-tests",
+        help="Include test files in dead code analysis",
+    ),
+    as_json: bool = typer.Option(
+        False,
+        "--json",
+        help="Output raw JSON results",
+    ),
+):
+    import json
+    from code_search_mcp.graph_engine import CodeGraphEngine
+
+    target_repo = resolve_repo_path(path or positional_path or "")
+    if not target_repo or not target_repo.exists():
+        print_error("Target repository not found")
+        raise typer.Exit(code=1)
+
+    engine = CodeGraphEngine(target_repo)
+    if not engine.load():
+        print_error("Call graph database not found. Please run 'code-search-graph index .' first.")
+        raise typer.Exit(code=1)
+
+    with console.status("[bold magenta]Scanning for uncalled dead code & zombie functions...[/bold magenta]", spinner="dots"):
+        res = engine.find_dead_code(limit=limit, include_tests=include_tests)
+
+    if as_json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    else:
+        print_dead_code_result(res)
+
+
+@app.command("ui", help="Launch interactive local Code Map Web UI in browser")
+def ui_cmd(
+    positional_path: Optional[str] = typer.Argument(
+        None,
+        metavar="[PATH]",
+        help="Target repository path (positional argument, default: current or most recently indexed repo)",
+    ),
+    path: Optional[str] = typer.Option(
+        None,
+        "--path",
+        "-p",
+        help="Target repository path (default: current or most recently indexed repo)",
+    ),
+    port: int = typer.Option(
+        8765,
+        "--port",
+        "-P",
+        help="Local HTTP port to bind (default: 8765)",
+    ),
+    no_browser: bool = typer.Option(
+        False,
+        "--no-browser",
+        help="Do not automatically open browser on startup",
+    ),
+):
+    from code_search_mcp.ui_server import launch_web_ui
+
+    target_repo = resolve_repo_path(path or positional_path or "")
+    if not target_repo or not target_repo.exists():
+        print_error("Target repository not found")
+        raise typer.Exit(code=1)
+
+    actual_port, server = launch_web_ui(target_repo, port=port, open_browser=not no_browser)
+    url = f"http://127.0.0.1:{actual_port}"
+    print_ui_banner(target_repo, url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+        console.print("\n[bold yellow]👋 Web UI server safely stopped[/bold yellow]\n")
 
 
 @app.command("watch", help="Start live hot-reloading repository file watcher")

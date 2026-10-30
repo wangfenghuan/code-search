@@ -73,6 +73,12 @@ code-search-graph index .
 
   # Upstream callers of a symbol
   code-search-graph callers "verify_password"
+
+  # Detect dead code and zombie functions across repo
+  code-search-graph deadcode
+
+  # Launch interactive Code Map Web UI in browser
+  code-search-graph ui
   ```
 
 ---
@@ -207,6 +213,16 @@ Combines:
 
 Fused via Reciprocal Rank Fusion ($RRF\_Score = \sum \frac{1}{k + rank_i}$) with **automatic camelCase / snake_case identifier splitting** (e.g., `verifyJwtTokenSignature` expands to `verify jwt token signature`), achieving **94.6% recall** on natural language code queries.
 
+### Dead Code & Zombie Function Detection (`find_dead_code`)
+Queries graph nodes with zero incoming callers across Python, Java, TypeScript, Go, and Rust. Intelligently filters out framework route endpoints, entry points (`main`, `__init__`), and test suites to pinpoint truly abandoned code for safe refactoring.
+
+### Interactive Code Map & Web UI (`code-search-graph ui`)
+Launches a zero-dependency local browser interface (standard library `http.server`) with:
+- **Force-directed call graph visualization** (zoom, pan, physics layout)
+- **Symbol inspector & source code preview** with syntax highlighting
+- **Live symbol filtering** by module, type (class/func/route), or dead status
+- Sub-second launch backed directly by the local SQLite graph.
+
 ### Architecture Outline Map
 `get_codebase_outline` generates a compact token-efficient skeleton map of all modules, classes, and exported methods (~500 tokens), letting agents grasp repo architecture without reading files.
 
@@ -242,6 +258,7 @@ All tools are configured with standard MCP annotations (`readOnlyHint`, `destruc
 | `index_codebase` | `readOnly: false` | `path`, `skip_vector?`, `force_vector?` | **Index Repository**: Scans and indexes codebase to build AST call graphs and vector embeddings with auto-watcher. |
 | `find_references` | `readOnly: true` | `symbol_or_keyword`, `path?` | **Find References**: Aggregates AST structural callers with ripgrep textual references across configs and code. |
 | `get_diff_context` | `readOnly: true` | `target?`, `path?`, `max_depth?` | **Git Diff Review**: Analyzes git diff to calculate blast radius, affected Web routes, and recommended tests before PR merge. |
+| `find_dead_code` | `readOnly: true` | `path?`, `limit?`, `include_tests?` | **Dead Code Detection**: Scans codebase for uncalled functions, unused methods, and zombie symbols that have zero incoming callers. |
 | `get_watch_status` | `readOnly: true` | `path?` | **Watcher Status**: Checks status and sync history of the live background file watcher. |
 
 ---
@@ -282,7 +299,15 @@ code-search-graph search "refund order payment" -p /path/to/project
 # 8. Start foreground file watcher
 code-search-graph watch -p /path/to/project --debounce 1500
 
-# 9. Cache management
+# 9. Dead code & zombie function detection
+code-search-graph deadcode -p /path/to/project
+code-search-graph deadcode --json
+
+# 10. Interactive Code Map Web UI
+code-search-graph ui -p /path/to/project
+code-search-graph ui --port 8765 --no-browser
+
+# 11. Cache management
 code-search-graph cache
 code-search-graph clean --orphaned
 ```
@@ -352,6 +377,12 @@ code-search-graph index .
 
   # 追查函数被谁调用（上游调用图）
   code-search-graph callers "verify_password"
+
+  # 检出全库死代码与从未被调用的孤立函数
+  code-search-graph deadcode
+
+  # 启动本地可视化代码地图与 Web UI
+  code-search-graph ui
   ```
 
 ---
@@ -376,11 +407,13 @@ code-search-graph             [█                                       ] 1,150
 ### 核心特性
 
 1. **一键手术级探索 (`explore_codebase`)**：单次调用返回入口路由、实现源码、上下游调用链路与证据切片，杜绝反复读文件。
-2. **改动爆炸半径 (`get_impact_radius`)**：重构前分析受波及的上游模块、文件与暴露的 HTTP API。
-3. **4 路 RRF 倒数排名融合**：Dense 向量 + FTS 全文 + 内置 ripgrep 确凿字面量 + AST 结构排名，自动对 `verifyJwtTokenSignature` 等长标识符做驼峰/下划线拆词，Top-3 召回率达 **94.6%**。
-4. **架构大纲地图 (`get_codebase_outline`)**：消耗数百 Token 快速理清多语言项目全貌与模块职责。
-5. **内置全平台预编译 ripgrep**：内置 Windows (`rg.exe`)、Linux (`musl`/`arm64`) 与 macOS (`Apple Silicon`/`Intel`) 静态二进制，零环境依赖。
-6. **恒定微批次低显存流水线**：300 块微批次流式写入 + 垃圾回收约束，常驻内存低于 **160MB**，彻底根除大仓库 **OOM 137**。
+2. **死代码与僵尸函数检测 (`find_dead_code` / `deadcode`)**：扫描全库 0 入度调用节点，自动排除生命周期入口与路由，精准定位无用代码，安全重构。
+3. **本地交互式代码地图 (`code-search-graph ui`)**：零额外依赖启动本地 Web 服务，力导向图可视化调用链路，支持符号搜索、死代码高亮与源码切片预览。
+4. **改动爆炸半径 (`get_impact_radius`)**：重构前分析受波及的上游模块、文件与暴露的 HTTP API。
+5. **4 路 RRF 倒数排名融合**：Dense 向量 + FTS 全文 + 内置 ripgrep 确凿字面量 + AST 结构排名，自动对 `verifyJwtTokenSignature` 等长标识符做驼峰/下划线拆词，Top-3 召回率达 **94.6%**。
+6. **架构大纲地图 (`get_codebase_outline`)**：消耗数百 Token 快速理清多语言项目全貌与模块职责。
+7. **内置全平台预编译 ripgrep**：内置 Windows (`rg.exe`)、Linux (`musl`/`arm64`) 与 macOS (`Apple Silicon`/`Intel`) 静态二进制，零环境依赖。
+8. **恒定微批次低显存流水线**：300 块微批次流式写入 + 垃圾回收约束，常驻内存低于 **160MB**，彻底根除大仓库 **OOM 137**。
 
 ### 实测性能基准
 

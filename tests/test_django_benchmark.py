@@ -156,12 +156,14 @@ def run_django_twophase_resolution(django_core_dir: Path):
     ambiguous = type_counts.get("AMBIGUOUS", 0)
     external = type_counts.get("EXTERNAL", 0)
 
+    pct_high = (high_conf / total_edges * 100) if total_edges > 0 else 0.0
     print(f"\n📈 Django 核心框架拓扑解析统计:")
     print(f"   • 全量确定性边总数: {total_edges} 条")
-    print(f"   • 高确信度确定边 (≥0.7): {high_conf} 条 ({(high_conf/total_edges)*100:.1f}%)")
+    print(f"   • 高确信度确定边 (≥0.7): {high_conf} 条 ({pct_high:.1f}%)")
     print(f"   • 边解析类型分布:")
     for k, v in sorted(type_counts.items(), key=lambda x: -x[1]):
-        print(f"     - {k:<16}: {v:>6} 条 ({(v/total_edges)*100:>5.1f}%)")
+        pct_v = (v / total_edges * 100) if total_edges > 0 else 0.0
+        print(f"     - {k:<16}: {v:>6} 条 ({pct_v:>5.1f}%)")
 
     # 4. 真实毫秒级查询延迟测试
     test_queries = [
