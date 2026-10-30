@@ -667,20 +667,32 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 """
 
 
+def get_web_dist_dir() -> Path:
+    return Path(__file__).resolve().parent / "web_dist"
+
+MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+}
+
+
 class CodeGraphRequestHandler(BaseHTTPRequestHandler):
-    """HTTP Request Handler for Code Graph Visualizer"""
+    """HTTP Request Handler for React Code Graph Visualizer"""
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
-
-        if path == "/" or path == "/index.html":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
-            return
 
         if path == "/api/graph":
             self.handle_api_graph()
@@ -692,6 +704,46 @@ class CodeGraphRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/source":
             self.handle_api_source(query)
+            return
+
+        # Serve React production build from web_dist
+        web_dist = get_web_dist_dir()
+        if web_dist.exists():
+            target_path = path.lstrip("/")
+            if target_path:
+                file_candidate = (web_dist / target_path).resolve()
+                try:
+                    file_candidate.relative_to(web_dist)
+                    if file_candidate.is_file():
+                        ext = file_candidate.suffix.lower()
+                        mime = MIME_TYPES.get(ext, "application/octet-stream")
+                        content = file_candidate.read_bytes()
+                        self.send_response(200)
+                        self.send_header("Content-Type", mime)
+                        self.send_header("Content-Length", str(len(content)))
+                        self.end_headers()
+                        self.wfile.write(content)
+                        return
+                except Exception:
+                    pass
+
+            # SPA route fallback to index.html
+            index_file = web_dist / "index.html"
+            if index_file.is_file():
+                content = index_file.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+
+        # Fallback to embedded HTML template
+        if path == "/" or not path.startswith("/api/"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
             return
 
         self.send_error(404, "Not Found")

@@ -35,7 +35,7 @@ if sys.platform == "win32":
 console = Console(highlight=False, legacy_windows=False)
 err_console = Console(stderr=True, highlight=False, legacy_windows=False)
 
-VERSION = "0.8.12"
+VERSION = "0.8.13"
 
 LOGO_BANNER = r"""[bold bright_cyan]   ____ ___  ____  _____     ____  _____    _    ____   ____ _   _ 
   / ___/ _ \|  _ \| ____|   / ___|| ____|  / \  |  _ \ / ___| | | |

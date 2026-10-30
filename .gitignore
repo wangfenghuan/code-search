@@ -36,3 +36,5 @@ tests/reports/*.json
 *.sqlite3-wal
 *.sqlite3-shm
 .code_search/
+node_modules/
+web/dist/

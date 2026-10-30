@@ -230,12 +230,14 @@ Full AST symbol and call graph extraction for modern component frameworks:
 ### Dead Code & Zombie Function Detection (`find_dead_code`)
 Queries graph nodes with zero incoming callers across Python, Java, TypeScript, Go, and Rust. Intelligently filters out framework route endpoints, entry points (`main`, `__init__`), and test suites to pinpoint truly abandoned code for safe refactoring.
 
-### Interactive Code Map & Web UI (`code-search-graph ui`)
-Launches a zero-dependency local browser interface (standard library `http.server`) with:
-- **Force-directed call graph visualization** (zoom, pan, physics layout)
-- **Symbol inspector & source code preview** with syntax highlighting
-- **Live symbol filtering** by module, type (class/func/route), or dead status
-- Sub-second launch backed directly by the local SQLite graph.
+### Interactive React Code Map & Web UI (`code-search-graph ui`)
+Modern, full-featured web intelligence console built with **React 18** and packaged with zero external runtime dependencies:
+- **Interactive Force-Directed Call Graph** (physics simulation, clustering, zoom/pan/focus)
+- **Dead Code Inspector Table** (inspect uncalled functions, reason, line counts, and docstrings)
+- **HTTP API Routes Catalog** (explore all discovered endpoints: GET/POST/PUT/DELETE, handler functions)
+- **Symbol Catalog & Explorer** (filter by classes, functions, methods, components with instant search)
+- **Integrated Source Code Viewer** (syntax-styled line-numbered code slice previews)
+- **Side Drawer Inspector** (inspect upstream callers & downstream callees with one-click navigation).
 
 ### Architecture Outline Map
 `get_codebase_outline` generates a compact token-efficient skeleton map of all modules, classes, and exported methods (~500 tokens), letting agents grasp repo architecture without reading files.
@@ -433,7 +435,7 @@ code-search-graph             [█                                       ] 1,150
 2. **高频加速守护进程 (`code-search-graph daemon`)**：常驻后台保持 SQLite 图谱与嵌入模型热加载，CLI 查询延迟从 1.3 秒直接降至 **5~20 毫秒**；无缝自适应降级，启动即享极致丝滑。
 3. **首级 Svelte 与 Vue 单文件组件支持**：支持 Svelte 3/4/5 Runes (`$state`, `$derived`) 与 SvelteKit 路由约定，深度提取组件调用、事件绑定与 TS 脚本。
 4. **死代码与僵尸函数检测 (`find_dead_code` / `deadcode`)**：扫描全库 0 入度调用节点，自动排除生命周期入口与路由，精准定位无用代码，安全重构。
-5. **本地交互式代码地图 (`code-search-graph ui`)**：零额外依赖启动本地 Web 服务，力导向图可视化调用链路，支持符号搜索、死代码高亮与源码切片预览。
+5. **全新 React 前端交互式代码地图 (`code-search-graph ui`)**：基于 React 18 前端框架构建的现代化代码智能控制台，内置力导向调用拓扑图、死代码检测清单、API 路由列表、全局符号目录与实时源码切片预览器。
 6. **改动爆炸半径 (`get_impact_radius`)**：重构前分析受波及的上游模块、文件与暴露的 HTTP API。
 7. **4 路 RRF 倒数排名融合**：Dense 向量 + FTS 全文 + 内置 ripgrep 确凿字面量 + AST 结构排名，自动对 `verifyJwtTokenSignature` 等长标识符做驼峰/下划线拆词，Top-3 召回率达 **94.6%**。
 8. **架构大纲地图 (`get_codebase_outline`)**：消耗数百 Token 快速理清多语言项目全貌与模块职责。
